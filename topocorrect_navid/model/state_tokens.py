@@ -227,6 +227,24 @@ class TopoCorrectStateModule(nn.Module):
         return base_navigation_embedding - torch.tanh(self.nav_gate) * self.build_zero_nav_delta(base_navigation_embedding)
 
     @staticmethod
+    def validate_instruction_inputs(instruction_ids, instruction_attention_mask, batch_size):
+        """Validate explicit raw-instruction tokens without reading their values."""
+        if instruction_ids is None and instruction_attention_mask is None:
+            return
+        if instruction_ids is None or instruction_attention_mask is None:
+            raise ValueError("instruction_ids and instruction_attention_mask must be provided together.")
+        if instruction_ids.ndim != 2 or instruction_attention_mask.ndim != 2:
+            raise ValueError("instruction_ids and instruction_attention_mask must have rank 2 [B, L].")
+        if instruction_ids.dtype != torch.long:
+            raise ValueError("instruction_ids must have dtype torch.long.")
+        if instruction_attention_mask.dtype != torch.bool:
+            raise ValueError("instruction_attention_mask must have dtype torch.bool.")
+        if instruction_ids.shape != instruction_attention_mask.shape:
+            raise ValueError("instruction_ids and instruction_attention_mask must have identical shapes.")
+        if instruction_ids.shape[0] != batch_size:
+            raise ValueError("instruction token batch size must match input_ids batch size.")
+
+    @staticmethod
     def validate_tokenizer_ids(tokenizer, video_end_token_id, navigation_token_id):
         for token, expected_id in (("</video_special>", video_end_token_id), ("[Navigation]", navigation_token_id)):
             actual_id = tokenizer.convert_tokens_to_ids(token)

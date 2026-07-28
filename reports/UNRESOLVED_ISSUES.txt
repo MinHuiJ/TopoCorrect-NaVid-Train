@@ -4,13 +4,15 @@ Unresolved issues after the zero-gated no-op integration
    single-token encodings; see TARGET_TOKENIZER_CONFIG_VALIDATION.txt. This phase
    did not load the 7B checkpoint, so full checkpoint loading remains outside its
    verified scope.
-2. The navigation integration fixture is fully exercised with synthetic tensors on
+2. The navigation integration fixture and stage-4A instruction interface are fully
+   exercised with synthetic tensors on
    /home/yons2/miniconda3/envs/navid/bin/python (PyTorch 2.0.1+cu118 and
-   Transformers 4.31.0): 6 tests pass, with no failures, errors, or skips. It does
+   Transformers 4.31.0): 19 tests pass, with no failures, errors, or skips. It does
    not load a real vision tower or a 7B checkpoint.
 3. Real TST is implemented, but NST remains intentionally zero-only. There is no
    instruction encoder, navigation-state model, action/Agent change, or cache
-   change. The only generation change remains transparent action-history forwarding.
+   change. Raw instruction tokens are now validated and transparently forwarded
+   only; the TST ignores them and no prompt-string parsing exists.
 4. Existing history semantics are retained: history contains the current frame at
    low resolution and final_token_length_lst remains only existing metadata. No
    visual cache or merge format was changed; no Habitat, training, or evaluation

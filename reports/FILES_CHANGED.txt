@@ -60,10 +60,21 @@ Tests
 16. reports/TST_IMPLEMENTATION_RESULTS.txt
 17. reports/TST_SHAPE_AND_GRADIENT_TESTS.txt
 18. reports/TST_CACHE_ISOLATION_TEST.txt
+19. uninavid/model/language_model/llava_llama_vid.py
+   - Threads explicit instruction_ids/instruction_attention_mask through forward
+     and first/cached generation preparation without changing existing fields.
+20. uninavid/model/uninavid_arch.py
+   - Receives and validates instruction fields only; it does not consume them in
+     TST/NST or alter its five-value return tuple.
+21. topocorrect_navid/model/state_tokens.py
+   - Adds standalone explicit instruction shape/dtype/batch validator; it never
+     inspects token values or prompt text.
+22. tests/test_topocorrect_instruction_interface.py
+23. reports/INSTRUCTION_INTERFACE_RESULTS.txt
 
 No tokenizer vocabulary, sentinel, Agent, vision cache, history merge logic, or
-NST implementation was modified. Generation behavior remains the action-history
-transparent forwarding introduced in stage 3A.
+NST implementation was modified. Generation behavior now transparently forwards
+only the stage-3A action fields and stage-4A instruction fields.
 
 Validation environment: /home/yons2/miniconda3/envs/navid/bin/python;
 PyTorch 2.0.1+cu118; Transformers 4.31.0. No 7B checkpoint, real vision tower,

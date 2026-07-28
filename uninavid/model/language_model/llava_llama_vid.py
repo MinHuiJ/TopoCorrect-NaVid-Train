@@ -96,6 +96,8 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
         prompts: Optional[List[str]] = None,
         action_history: Optional[torch.LongTensor] = None,
         action_history_mask: Optional[torch.BoolTensor] = None,
+        instruction_ids: Optional[torch.LongTensor] = None,
+        instruction_attention_mask: Optional[torch.BoolTensor] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -113,6 +115,7 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
         input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(
             input_ids, attention_mask, past_key_values, labels, images, prompts=prompts,
             action_history=action_history, action_history_mask=action_history_mask,
+            instruction_ids=instruction_ids, instruction_attention_mask=instruction_attention_mask,
         )
 
         torch.cuda.empty_cache()
@@ -177,10 +180,16 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
         )
         action_history = kwargs.get("action_history")
         action_history_mask = kwargs.get("action_history_mask")
+        instruction_ids = kwargs.get("instruction_ids")
+        instruction_attention_mask = kwargs.get("instruction_attention_mask")
         if action_history is not None:
             model_inputs["action_history"] = action_history
         if action_history_mask is not None:
             model_inputs["action_history_mask"] = action_history_mask
+        if instruction_ids is not None:
+            model_inputs["instruction_ids"] = instruction_ids
+        if instruction_attention_mask is not None:
+            model_inputs["instruction_attention_mask"] = instruction_attention_mask
         return model_inputs
 
 AutoConfig.register("llava", LlavaConfig)

@@ -1,0 +1,40 @@
+Instruction-token interface results (stage 4A)
+
+Modified interfaces
+- LlavaLlamaAttForCausalLM.forward, uninavid/model/language_model/llava_llama_vid.py:85-119:
+  instruction_ids: Optional[torch.LongTensor] and instruction_attention_mask:
+  Optional[torch.BoolTensor] are forwarded unchanged to multimodal preparation.
+- LlavaLlamaAttForCausalLM.prepare_inputs_for_generation, same file:161-196:
+  both non-None kwargs are explicitly returned on the first and cached generation
+  steps; existing input_ids/inputs_embeds/images/action-history behavior is unchanged.
+- UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal,
+  uninavid/model/uninavid_arch.py:383-389: accepts both fields, validates them,
+  and retains the original five-value return tuple.
+- TopoCorrectStateModule.validate_instruction_inputs,
+  topocorrect_navid/model/state_tokens.py:229-245: validates the explicit API
+  without reading token values or parsing prompts.
+
+Contract
+- instruction_ids: torch.long [B,L]
+- instruction_attention_mask: torch.bool [B,L]
+- both None is compatible; both supplied must have rank 2, equal shape, and the
+  same batch size as input_ids. L=0 and all-False masks are valid.
+- one-sided fields, rank/dtype/shape/batch mismatches raise ValueError.
+
+Generation and no-op validation
+- First and past_key_values cached generation steps retain both fields.
+- Missing instruction fields leave the old generation key set unchanged.
+- With no field, regular [1,4] field, empty [1,0] field, and all-False mask,
+  inputs_embeds maximum absolute error is 0.0; expanded sequence length remains
+  77 / 77; labels and attention masks are exactly equal.
+- Two fully different instruction tensors produce elementwise-identical detached
+  TST topo_state (maximum absolute error 0.0), confirming TST does not read them.
+
+Test command
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover \
+    -s tests -p 'test_topocorrect_*.py' -v
+Result: Ran 19 tests in 0.696s — OK (0 failures, 0 errors, 0 skipped).
+
+NST remains zero-only; no instruction embedding or prompt-string parsing was added.
+Agent, visual cache, history merge, lm_head, checkpoint loading, real vision tower,
+Habitat, training, and evaluation were not modified or run.
