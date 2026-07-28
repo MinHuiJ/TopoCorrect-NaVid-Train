@@ -1,0 +1,22 @@
+Stage 4D-1 — topology node identity and recovery mapping
+
+Source
+- topocorrect_navid/model/state_tokens.py
+  - TopologicalStateEncoder.forward(), lines 160-210, retains
+    original_node_indices and original_time_indices. Relation temporal distance
+    and adjacency are calculated from original indices at lines 177-184, rather
+    than compressed padded positions.
+  - TopoCorrectStateModule.map_recovery_target_to_original(), lines 430-447,
+    maps a recovery target's padded position to its original node and time IDs;
+    invalid/padded selections raise ValueError.
+
+Test result
+- tests/test_topocorrect_node_identity.py uses original nodes [0,1,2,3,4] with
+  max_topo_nodes=3. Deterministic truncation retains [0,3,4].
+- It confirms 0 and 3 have adjacency 0, while 3 and 4 have adjacency 1.
+- A recovery prediction at padded position 1 maps to
+  original_node_index=3 and original_time_index=3.
+- A padded recovery target is rejected explicitly.
+
+The recovery target logits use -inf for invalid padded nodes. This phase only
+exposes the mapping; it does not change Agent recovery/backtracking behavior.

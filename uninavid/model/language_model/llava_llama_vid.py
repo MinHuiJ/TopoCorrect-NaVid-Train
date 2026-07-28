@@ -104,6 +104,8 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
         action_history_mask: Optional[torch.BoolTensor] = None,
         instruction_ids: Optional[torch.LongTensor] = None,
         instruction_attention_mask: Optional[torch.BoolTensor] = None,
+        topocorrect_labels: Optional[dict] = None,
+        return_topocorrect_outputs: bool = False,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -156,13 +158,25 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        result = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        if return_topocorrect_outputs:
+            result.topocorrect_outputs = self.get_model().topocorrect_state.current_batch_outputs
+        if topocorrect_labels and self.get_model().topocorrect_state.current_batch_outputs is not None:
+            aux_loss, aux_losses = self.get_model().topocorrect_state.compute_topocorrect_aux_losses(
+                self.get_model().topocorrect_state.current_batch_outputs["nav"], topocorrect_labels
+            )
+            result.lm_loss = loss
+            result.topocorrect_aux_loss = aux_loss
+            result.topocorrect_aux_losses = aux_losses
+            if aux_loss is not None and loss is not None:
+                result.loss = loss + self.config.topocorrect_aux_loss_weight * aux_loss
+        return result
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs

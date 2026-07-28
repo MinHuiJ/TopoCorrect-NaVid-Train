@@ -19,3 +19,7 @@ Unresolved issues after the zero-gated no-op integration
    was run.
 5. CUDA/fp16/bf16 metadata-transfer validation remains unexecuted locally; CPU
    synthetic coverage verifies device-transfer logic without loading a real model.
+6. Stage 4D-1 now provides padded formal topology/navigation outputs and stable
+   recovery identity mapping. Stage 4D-2 remains: complete padding-aware
+   supervision for all TST/NST heads, loss weighting, and trainer label/data
+   construction. No Agent recovery/backtracking behavior is implemented.

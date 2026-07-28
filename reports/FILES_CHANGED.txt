@@ -91,6 +91,21 @@ Tests
 36. reports/PROGRESS_PADDING_INVARIANCE_TEST.txt
 37. reports/DEVICE_DTYPE_COMPATIBILITY_TEST.txt
 38. reports/STRUCTURED_STATE_OUTPUT_TEST.txt
+39. topocorrect_navid/model/state_tokens.py
+   - Adds original node/time identity output, original-time relation features,
+     recovery target mapping, and formal variable-length batch collation.
+40. uninavid/model/uninavid_arch.py
+   - Collects local topo/nav results for every current-batch sample and publishes
+     a padded formal batch structure; caches and history merge are untouched.
+41. uninavid/model/language_model/llava_llama_vid.py
+   - Attaches formal current-batch outputs only when return_topocorrect_outputs
+     is requested, while retaining current simplified auxiliary-loss plumbing.
+42. tests/test_topocorrect_batch_outputs.py
+43. tests/test_topocorrect_node_identity.py
+44. tests/test_topocorrect_production_outputs.py
+45. reports/BATCH_STRUCTURED_OUTPUT_RESULTS.txt
+46. reports/TOPO_NODE_IDENTITY_MAPPING_TEST.txt
+47. reports/PRODUCTION_STRUCTURED_OUTPUT_RESULTS.txt
 
 No tokenizer vocabulary, sentinel, Agent, vision cache, history merge logic, or
 No Agent, vision cache, history merge, lm_head, or action execution logic was

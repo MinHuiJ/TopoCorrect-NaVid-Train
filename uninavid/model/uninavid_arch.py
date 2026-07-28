@@ -385,6 +385,14 @@ class UniNaVIDMetaForCausalLM(ABC):
                                              action_history=None, action_history_mask=None,
                                              instruction_ids=None, instruction_attention_mask=None):
         self.get_model().topocorrect_state.clear_debug_outputs()
+        structured_topocorrect_outputs = []
+        if (action_history is None) != (action_history_mask is None):
+            raise ValueError("action_history and action_history_mask must be provided together.")
+        if action_history is not None:
+            if action_history.ndim != 2 or action_history_mask.ndim != 2 or action_history.shape != action_history_mask.shape:
+                raise ValueError("action_history and action_history_mask must have equal shape [B, T].")
+            if action_history.shape[0] != input_ids.shape[0] or action_history.dtype != torch.long or action_history_mask.dtype != torch.bool:
+                raise ValueError("action_history must be long, mask bool, and batch-aligned with input_ids.")
         self.get_model().topocorrect_state.validate_instruction_inputs(
             instruction_ids, instruction_attention_mask, input_ids.shape[0]
         )
@@ -431,6 +439,8 @@ class UniNaVIDMetaForCausalLM(ABC):
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
+            sample_topo_outputs = None
+            sample_nav_outputs = None
             if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
                 # multimodal LLM, but the current sample is not multimodal
                 # FIXME: this is a hacky fix, for deepspeed zero3 to work
@@ -443,6 +453,7 @@ class UniNaVIDMetaForCausalLM(ABC):
                 cur_input_embeds_2 = self.get_model().embed_tokens(cur_input_ids[half_len:])
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0], cur_input_embeds_2], dim=0)
                 new_input_embeds.append(cur_input_embeds)
+                structured_topocorrect_outputs.append({"topo": None, "nav": None})
                 if labels is not None:
                     new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
@@ -561,6 +572,7 @@ class UniNaVIDMetaForCausalLM(ABC):
                                     use_encoder=getattr(self.config, 'use_topological_state_encoder', False),
                                     return_outputs=True,
                                 )
+                                sample_topo_outputs = topo_outputs
                                 cur_new_input_embeds.append(tst_embedding)
                                 cur_new_input_embeds.append(video_end_and_image_start[1:2])
                             else:
@@ -634,7 +646,7 @@ class UniNaVIDMetaForCausalLM(ABC):
                                 batch_instruction_ids = instruction_ids[batch_idx:batch_idx + 1].to(embedding_device)
                                 batch_instruction_mask = instruction_attention_mask[batch_idx:batch_idx + 1].to(embedding_device)
                             batch_instruction_embeddings = self.get_model().embed_tokens(batch_instruction_ids)
-                            nst_embedding, _ = self.get_model().topocorrect_state.build_nst_embedding_with_encoder(
+                            nst_embedding, sample_nav_outputs = self.get_model().topocorrect_state.build_nst_embedding_with_encoder(
                                 tail_embeddings[1:2], batch_instruction_ids, batch_instruction_mask,
                                 batch_instruction_embeddings, current_visual_tokens, topo_outputs,
                                 use_encoder=(getattr(self.config, 'use_navigation_state_encoder', False)
@@ -650,6 +662,7 @@ class UniNaVIDMetaForCausalLM(ABC):
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
                 cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
                 new_input_embeds.append(cur_new_input_embeds)
+                structured_topocorrect_outputs.append({"topo": sample_topo_outputs, "nav": sample_nav_outputs})
                 if labels is not None:
                     cur_new_labels = torch.cat(cur_new_labels, dim=0)
                     assert cur_new_input_embeds.shape[0] == cur_new_labels.shape[0]
@@ -670,9 +683,14 @@ class UniNaVIDMetaForCausalLM(ABC):
                 cur_image_features = image_features[cur_image_idx]
                 cur_new_input_embeds[image_token_indices] = cur_image_features
                 new_input_embeds.append(cur_new_input_embeds)
+                structured_topocorrect_outputs.append({"topo": None, "nav": None})
                 if labels is not None:
                     new_labels.append(cur_labels)
                 cur_image_idx += 1
+
+        self.get_model().topocorrect_state.current_batch_outputs = (
+            self.get_model().topocorrect_state.collate_batch_outputs(structured_topocorrect_outputs)
+        )
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)

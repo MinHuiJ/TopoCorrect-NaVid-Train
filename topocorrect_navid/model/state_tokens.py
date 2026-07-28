@@ -134,6 +134,7 @@ class TopologicalStateEncoder(nn.Module):
         action_summary = self.action_encoder(action_history, action_history_mask, batch_size, device)
         node_lists, compression_lists = [], []
         for history, lengths in zip(history_visual_tokens, history_group_lengths):
+            original_indices = list(range(len(lengths)))
             if self.max_topo_nodes is not None and len(lengths) > self.max_topo_nodes:
                 # Deterministically retain the first node and most recent nodes.
                 keep_indices = [0] + list(range(len(lengths) - (self.max_topo_nodes - 1), len(lengths)))
@@ -143,14 +144,15 @@ class TopologicalStateEncoder(nn.Module):
                     start += length
                 history = torch.cat([history[left:right] for left, right in (offsets[i] for i in keep_indices)], dim=0)
                 lengths = [lengths[i] for i in keep_indices]
+                original_indices = [original_indices[i] for i in keep_indices]
             nodes, compressed = [], []
             offset = 0
             total = len(lengths)
             for index, length in enumerate(lengths):
                 visual_node = self.node_pooler(history[offset:offset + length])
-                temporal = 0.0 if total == 1 else index / (total - 1)
+                temporal = 0.0 if len(original_indices) == 1 else original_indices[index] / max(original_indices[-1], 1)
                 extras = visual_node.new_tensor([temporal, math.log1p(length), float(length == 1)])
-                nodes.append((visual_node, extras))
+                nodes.append((visual_node, extras, original_indices[index]))
                 compressed.append(length == 1)
                 offset += length
             node_lists.append(nodes)
@@ -160,21 +162,23 @@ class TopologicalStateEncoder(nn.Module):
         raw_nodes = current_summary.new_zeros(batch_size, max_nodes, self.state_dim)
         padding_mask = torch.ones(batch_size, max_nodes, dtype=torch.bool, device=device)
         compressed_mask = torch.zeros(batch_size, max_nodes, dtype=torch.bool, device=device)
+        original_node_indices = torch.full((batch_size, max_nodes), -1, dtype=torch.long, device=device)
         for batch_index, nodes in enumerate(node_lists):
-            for node_index, (visual_node, extras) in enumerate(nodes):
+            for node_index, (visual_node, extras, original_index) in enumerate(nodes):
                 raw_nodes[batch_index, node_index] = visual_node
                 padded_nodes[batch_index, node_index] = self.node_fusion(torch.cat([
                     visual_node, current_summary[batch_index], action_summary[batch_index], extras
                 ]))
                 padding_mask[batch_index, node_index] = False
                 compressed_mask[batch_index, node_index] = compression_lists[batch_index][node_index]
+                original_node_indices[batch_index, node_index] = original_index
         normalized_nodes = F.normalize(raw_nodes, dim=-1)
         visual_similarity = torch.matmul(normalized_nodes, normalized_nodes.transpose(1, 2))
         temporal_distance = raw_nodes.new_zeros(batch_size, max_nodes, max_nodes)
         adjacency = raw_nodes.new_zeros(batch_size, max_nodes, max_nodes)
         for batch_index, nodes in enumerate(node_lists):
             node_count = len(nodes)
-            positions = torch.arange(node_count, device=device, dtype=raw_nodes.dtype)
+            positions = original_node_indices[batch_index, :node_count].to(raw_nodes.dtype)
             distances = (positions[:, None] - positions[None, :]).abs()
             temporal_distance[batch_index, :node_count, :node_count] = distances / max(node_count - 1, 1)
             adjacency[batch_index, :node_count, :node_count] = (distances == 1).to(raw_nodes.dtype)
@@ -194,12 +198,15 @@ class TopologicalStateEncoder(nn.Module):
             "node_states": padded_nodes,
             "topo_state": topo_state,
             "relation_bias": relation_bias,
+            "relation_features": relation_features,
             "revisit_logits": revisit_logits,
             "novelty_logit": self.novelty_head(topo_state.squeeze(1)),
             "stagnation_logit": self.stagnation_head(topo_state.squeeze(1)),
             "padding_mask": padding_mask,
             "action_summary": action_summary,
             "current_visual_summary": current_summary,
+            "original_node_indices": original_node_indices,
+            "original_time_indices": original_node_indices.clone(),
         }
         return delta_topo, outputs
 
@@ -305,9 +312,11 @@ class NavigationStateEncoder(nn.Module):
         ).squeeze(1) / math.sqrt(self.state_dim)
         recovery_target_logits = recovery_target_logits.masked_fill(topo_node_mask, float("-inf"))
         return delta_nav, {
+            "delta_nav": delta_nav,
             "landmark_logits": landmark_logits,
             "instruction_pointer_logits": pointer_logits,
             "instruction_pointer_probs": pointer_probs,
+            "instruction_mask": instruction_attention_mask,
             "progress": progress.clamp(0.0, 1.0),
             "progress_confidence": torch.sigmoid(self.progress_confidence_head(nav_state.squeeze(1))),
             "stop_readiness_logit": self.stop_readiness_head(nav_state.squeeze(1)),
@@ -342,10 +351,12 @@ class TopoCorrectStateModule(nn.Module):
         )
         self.last_topo_outputs = None
         self.last_nav_outputs = None
+        self.current_batch_outputs = []
 
     def clear_debug_outputs(self):
         self.last_topo_outputs = None
         self.last_nav_outputs = None
+        self.current_batch_outputs = []
 
     def build_zero_topo_delta(self, base_video_end_embedding):
         return torch.zeros_like(base_video_end_embedding)
@@ -366,6 +377,7 @@ class TopoCorrectStateModule(nn.Module):
         )
         self.last_topo_outputs = {name: value.detach() for name, value in outputs.items()}
         embedding = base + torch.tanh(self.topo_gate) * delta_topo
+        outputs["delta_topo"] = delta_topo
         embedding = embedding.squeeze(1) if len(original_shape) == 2 else embedding
         return (embedding, outputs) if return_outputs else embedding
 
@@ -414,6 +426,87 @@ class TopoCorrectStateModule(nn.Module):
         ce("recovery_target_index", "recovery_target_logits")
         total = sum(losses.values()) if losses else None
         return total, losses
+
+    @staticmethod
+    def map_recovery_target_to_original(recovery_target_index, original_node_indices,
+                                        original_time_indices, node_mask):
+        """Map padded recovery indices to stable original node/time identities."""
+        if recovery_target_index.ndim != 1:
+            raise ValueError("recovery_target_index must have shape [B].")
+        if original_node_indices.shape != original_time_indices.shape or node_mask.shape != original_node_indices.shape:
+            raise ValueError("node identity tensors and node_mask must have identical [B, N] shape.")
+        rows = torch.arange(recovery_target_index.shape[0], device=recovery_target_index.device)
+        if (recovery_target_index < 0).any() or (recovery_target_index >= node_mask.shape[1]).any():
+            raise ValueError("recovery target index is outside padded node range.")
+        valid = node_mask[rows, recovery_target_index]
+        if not valid.all():
+            raise ValueError("recovery target points to a padded topology node.")
+        return {
+            "original_node_indices": original_node_indices[rows, recovery_target_index],
+            "original_time_indices": original_time_indices[rows, recovery_target_index],
+        }
+
+    @staticmethod
+    def collate_batch_outputs(sample_outputs):
+        """Pad variable-node and variable-instruction outputs into a batch structure."""
+        if not sample_outputs or not any(item.get("topo") is not None for item in sample_outputs):
+            return None
+        topo_template = next(item["topo"] for item in sample_outputs if item.get("topo") is not None)
+        nav_template = next((item["nav"] for item in sample_outputs if item.get("nav") is not None), None)
+        batch_size = len(sample_outputs)
+        node_max = max((item["topo"]["node_states"].shape[1] if item.get("topo") is not None else 0) for item in sample_outputs)
+        instruction_max = max((item["nav"]["landmark_logits"].shape[1] if item.get("nav") is not None else 0) for item in sample_outputs)
+        device, dtype = topo_template["topo_state"].device, topo_template["topo_state"].dtype
+        state_dim = topo_template["node_states"].shape[-1]
+        hidden = topo_template["delta_topo"].shape[-1]
+        topo = {
+            "delta_topo": torch.zeros(batch_size, 1, hidden, device=device, dtype=dtype),
+            "topo_state": torch.zeros(batch_size, 1, state_dim, device=device, dtype=dtype),
+            "node_states": torch.zeros(batch_size, node_max, state_dim, device=device, dtype=dtype),
+            "node_mask": torch.zeros(batch_size, node_max, device=device, dtype=torch.bool),
+            "original_node_indices": torch.full((batch_size, node_max), -1, device=device, dtype=torch.long),
+            "original_time_indices": torch.full((batch_size, node_max), -1, device=device, dtype=torch.long),
+            "revisit_logits": torch.zeros(batch_size, node_max, device=device, dtype=dtype),
+            "novelty_logit": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+            "stagnation_logit": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+        }
+        nav = {
+            "delta_nav": torch.zeros(batch_size, 1, hidden, device=device, dtype=dtype),
+            "landmark_logits": torch.zeros(batch_size, instruction_max, device=device, dtype=dtype),
+            "instruction_cross_attention": torch.zeros(batch_size, instruction_max, device=device, dtype=dtype),
+            "instruction_pointer_logits": torch.zeros(batch_size, instruction_max, device=device, dtype=dtype),
+            "instruction_pointer_probs": torch.zeros(batch_size, instruction_max, device=device, dtype=dtype),
+            "instruction_mask": torch.zeros(batch_size, instruction_max, device=device, dtype=torch.bool),
+            "progress": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+            "progress_confidence": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+            "stop_readiness_logit": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+            "failure_logits": torch.zeros(batch_size, (nav_template["failure_logits"].shape[-1] if nav_template is not None else 8), device=device, dtype=dtype),
+            "correction_logit": torch.zeros(batch_size, 1, device=device, dtype=dtype),
+            "recovery_mode_logits": torch.zeros(batch_size, (nav_template["recovery_mode_logits"].shape[-1] if nav_template is not None else 4), device=device, dtype=dtype),
+            "recovery_target_logits": torch.full((batch_size, node_max), float("-inf"), device=device, dtype=dtype),
+        }
+        for batch_index, item in enumerate(sample_outputs):
+            source_topo, source_nav = item.get("topo"), item.get("nav")
+            if source_topo is None:
+                continue
+            count = source_topo["node_states"].shape[1]
+            for key in ("delta_topo", "topo_state", "novelty_logit", "stagnation_logit"):
+                topo[key][batch_index] = source_topo[key].squeeze(0)
+            topo["node_states"][batch_index, :count] = source_topo["node_states"].squeeze(0)
+            topo["node_mask"][batch_index, :count] = ~source_topo["padding_mask"].squeeze(0)
+            topo["original_node_indices"][batch_index, :count] = source_topo["original_node_indices"].squeeze(0)
+            topo["original_time_indices"][batch_index, :count] = source_topo["original_time_indices"].squeeze(0)
+            topo["revisit_logits"][batch_index, :count] = source_topo["revisit_logits"].squeeze(0)
+            if source_nav is None:
+                continue
+            length = source_nav["landmark_logits"].shape[1]
+            for key in ("delta_nav", "progress", "progress_confidence", "stop_readiness_logit", "failure_logits", "correction_logit", "recovery_mode_logits"):
+                nav[key][batch_index] = source_nav[key].squeeze(0)
+            for key in ("landmark_logits", "instruction_cross_attention", "instruction_pointer_logits", "instruction_pointer_probs"):
+                nav[key][batch_index, :length] = source_nav[key].squeeze(0)
+            nav["instruction_mask"][batch_index, :length] = source_nav["instruction_mask"].squeeze(0)
+            nav["recovery_target_logits"][batch_index, :count] = source_nav["recovery_target_logits"].squeeze(0)
+        return {"topo": topo, "nav": nav}
 
     @staticmethod
     def validate_instruction_inputs(instruction_ids, instruction_attention_mask, batch_size):

@@ -1,0 +1,46 @@
+Stage 4D-1 — batch structured TopoCorrect outputs
+
+Implementation
+- topocorrect_navid/model/state_tokens.py
+  - TopoCorrectStateModule.collate_batch_outputs(), lines 450-509, converts the
+    current forward's per-sample encoder outputs into topocorrect_outputs with
+    `topo` and `nav` dictionaries. It is not derived from last_* debug fields.
+  - `topo` tensors: delta_topo [B,1,H], topo_state [B,1,D], node_states
+    [B,Nmax,D], node_mask [B,Nmax] (True means valid), original_node_indices
+    [B,Nmax], original_time_indices [B,Nmax], revisit_logits [B,Nmax],
+    novelty_logit [B,1], and stagnation_logit [B,1].
+  - `nav` tensors: delta_nav [B,1,H], landmark_logits/cross_attention/
+    pointer_logits/pointer_probs [B,Lmax], instruction_mask [B,Lmax], progress,
+    progress_confidence, stop_readiness_logit, correction_logit [B,1],
+    failure_logits [B,8], recovery_mode_logits [B,4], and recovery_target_logits
+    [B,Nmax].
+- uninavid/model/uninavid_arch.py
+  - prepare_inputs_labels_for_multimodal(), lines 383-693, resets diagnostics at
+    entry, collects topo/nav output locally for every sample, and publishes the
+    collated current-batch structure at lines 691-693 without changing its
+    five-value return contract.
+- uninavid/model/language_model/llava_llama_vid.py
+  - forward(), lines 91-179, attaches the complete batch structure only when
+    return_topocorrect_outputs=True. Default return behavior is unchanged.
+
+Padding rules
+- node state/revisit padding is zero; node_mask padding is False; original node
+  and time identities padding is -1.
+- instruction-related numerical padding is zero and instruction_mask padding is
+  False.
+- recovery_target_logits invalid/padded node positions are -inf. The NST encoder
+  rejects all-masked topology input before any topology softmax/attention use.
+
+Validation
+- tests/test_topocorrect_batch_outputs.py: B=2 with node counts 3/6 and
+  instruction lengths 5/9 verifies every required padded batch shape and value.
+- tests/test_topocorrect_production_outputs.py: synthetic production multimodal
+  route verifies both samples are retained, masks are correct, baseline vs zero
+  gates has maximum absolute inputs_embeds error 0, and sequence length, labels,
+  and attention mask are identical.
+- Full command:
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover -s tests -p 'test_topocorrect_*.py' -v
+  Result: Ran 29 tests; OK; failures=0, errors=0, skipped=0.
+
+No complete 7B checkpoint, real vision tower, Habitat, training, or evaluation
+was loaded/run. Visual caches and history merge logic were not modified.

@@ -1,0 +1,22 @@
+Stage 4D-1 — production return compatibility
+
+- forward() in uninavid/model/language_model/llava_llama_vid.py, lines 91-179,
+  accepts return_topocorrect_outputs. False preserves the ordinary
+  CausalLMOutputWithPast fields (.loss, .logits, .past_key_values); True adds a
+  dynamic topocorrect_outputs attribute for the current forward only.
+- prepare_inputs_labels_for_multimodal() remains a five-value interface and
+  places its formal current-batch output in model.topocorrect_state.current_batch_outputs.
+- last_topo_outputs and last_nav_outputs are reset at the start of preparation
+  (uninavid/model/uninavid_arch.py:387) and hold detached diagnostics only
+  (topocorrect_navid/model/state_tokens.py:378,401). They are not used to form
+  formal batch output.
+
+Synthetic B=2 production-path test:
+- sample 0: 3 topology nodes and 5 valid instruction tokens;
+- sample 1: 6 topology nodes and 9 valid instruction tokens;
+- formal output is [2,6,8] node states and [2,9] instruction mask;
+- zero gates preserve inputs_embeds exactly (max abs error 0), and preserve
+  sequence length, labels, and attention mask exactly.
+
+Remaining for stage 4D-2: complete TST/NST label coverage, padding-aware
+auxiliary losses for all heads, loss weighting, and trainer data construction.
