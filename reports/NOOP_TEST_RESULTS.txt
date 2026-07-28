@@ -1,0 +1,27 @@
+TopoCorrect zero-gated no-op test results
+
+Executed command (2026-07-28):
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover \
+    -s tests -p 'test_topocorrect_*.py' -v
+
+Environment:
+- Python: /home/yons2/miniconda3/envs/navid/bin/python
+- PyTorch: 2.0.1+cu118
+- Transformers: 4.31.0
+
+Result: PASS; 6 tests run, 0 failures, 0 errors, 0 skipped (Ran 6 tests in
+0.873s; OK).
+
+Validated assertions:
+- baseline versus use_topocorrect_tokens=True with both gates 0: inputs_embeds
+  maximum absolute error = 0.0;
+- sequence length before/after = 77 / 77 embeddings;
+- labels are assert_close equal;
+- attention mask is assert_close equal;
+- malformed [Navigation] order raises the expected RuntimeError;
+- topo_gate and nav_gate initialize exactly to 0.0; both deltas are zero tensors;
+- normal state_dict roundtrip preserves the two gates and the serialized
+  use_topocorrect_tokens config value.
+
+Tests used synthetic tensors only. No 7B checkpoint or real vision tower was
+loaded; no Habitat, training, evaluation, visual cache, or history-merge code ran.

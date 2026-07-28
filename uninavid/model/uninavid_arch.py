@@ -381,7 +381,7 @@ class UniNaVIDMetaForCausalLM(ABC):
 
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, attention_mask, past_key_values, labels, images,
-                                             prompts=None):
+                                             prompts=None, use_topocorrect_tokens=None):
         if 'grid' in self.config.compress_type:
             grid_size = int(self.config.compress_type.split('grid:')[-1])
             if grid_size == 2:
@@ -451,6 +451,10 @@ class UniNaVIDMetaForCausalLM(ABC):
 
             if not long_video:
                 token_idx = 0  
+                use_topocorrect = (
+                    getattr(self.config, 'use_topocorrect_tokens', False)
+                    if use_topocorrect_tokens is None else use_topocorrect_tokens
+                )
                 while image_token_indices.numel() > 0:
                     if isinstance(image_features, list):
                         cur_image_features = image_features[cur_image_idx][token_idx]
@@ -502,6 +506,23 @@ class UniNaVIDMetaForCausalLM(ABC):
                             assert video_or_not[cur_image_idx] is True  
                             assert token_idx == 0  
                             assert nav_or_not[cur_image_idx][token_idx].shape[0] == 64  
+                            if use_topocorrect:
+                                video_end_id = self.config.topocorrect_video_end_token_id
+                                navigation_id = self.config.topocorrect_navigation_token_id
+                                video_end_positions = torch.where(cur_input_ids == video_end_id)[0]
+                                navigation_positions = torch.where(cur_input_ids == navigation_id)[0]
+                                expected_video_end_position = image_token_start + 1
+                                expected_navigation_position = image_token_start + 4
+                                if (video_end_positions.numel() != 1 or
+                                        navigation_positions.numel() != 1 or
+                                        video_end_positions.item() != expected_video_end_position or
+                                        navigation_positions.item() != expected_navigation_position or
+                                        cur_input_ids[image_token_start + 2].item() != self.config.topocorrect_image_start_token_id or
+                                        cur_input_ids[image_token_start + 3].item() != self.config.topocorrect_image_end_token_id):
+                                    raise RuntimeError(
+                                        'TopoCorrect navigation token order must be IMAGE_TOKEN_INDEX, '
+                                        '</video_special>, <image_special>, </image_special>, [Navigation].'
+                                    )
                             cur_new_input_embeds.append(
                                 self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                             seperator_token = self.get_model().embed_tokens(cur_input_ids[image_token_start - 1, None])
@@ -513,8 +534,15 @@ class UniNaVIDMetaForCausalLM(ABC):
                                     break
                                 cur_new_input_embeds.append(seperator_token)
                                 video_index += ii
-                            cur_new_input_embeds.append(self.get_model().embed_tokens(
-                                cur_input_ids[image_token_start + 1:image_token_start + 3]))
+                            video_end_and_image_start = self.get_model().embed_tokens(
+                                cur_input_ids[image_token_start + 1:image_token_start + 3])
+                            if use_topocorrect:
+                                tst_embedding = self.get_model().topocorrect_state.build_tst_embedding(
+                                    video_end_and_image_start[:1])
+                                cur_new_input_embeds.append(tst_embedding)
+                                cur_new_input_embeds.append(video_end_and_image_start[1:2])
+                            else:
+                                cur_new_input_embeds.append(video_end_and_image_start)
                             cur_new_input_embeds.append(nav_or_not[cur_image_idx][token_idx])
                             
                             
@@ -566,7 +594,21 @@ class UniNaVIDMetaForCausalLM(ABC):
                                                                                       'mm_use_im_start_end', False):
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
                     else:
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
+                        if use_topocorrect:
+                            navigation_position = torch.where(
+                                cur_input_ids == self.config.topocorrect_navigation_token_id)[0]
+                            if navigation_position.numel() != 1 or navigation_position.item() != 1:
+                                raise RuntimeError(
+                                    'TopoCorrect expected [Navigation] immediately after </image_special>.'
+                                )
+                            tail_embeddings = self.get_model().embed_tokens(cur_input_ids)
+                            nst_embedding = self.get_model().topocorrect_state.build_nst_embedding(
+                                tail_embeddings[1:2])
+                            tail_embeddings = torch.cat(
+                                [tail_embeddings[:1], nst_embedding, tail_embeddings[2:]], dim=0)
+                            cur_new_input_embeds.append(tail_embeddings)
+                        else:
+                            cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                     if labels is not None:
                         cur_new_labels.append(cur_labels)
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
@@ -650,6 +692,11 @@ class UniNaVIDMetaForCausalLM(ABC):
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         tokenizer.add_tokens([VIDEO_START_SPECIAL_TOKEN, VIDEO_END_SPECIAL_TOKEN, IMAGE_START_TOKEN, IMAGE_END_TOKEN, NAVIGATION_SPECIAL_TOKEN, IAMGE_SEPARATOR], special_tokens=True)
         self.resize_token_embeddings(len(tokenizer))
+        self.get_model().topocorrect_state.validate_tokenizer_ids(
+            tokenizer,
+            self.config.topocorrect_video_end_token_id,
+            self.config.topocorrect_navigation_token_id,
+        )
         if model_args.mm_use_im_patch_token:
             tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
@@ -694,5 +741,3 @@ class UniNaVIDMetaForCausalLM(ABC):
                     p.requires_grad = False
 
    
-
-

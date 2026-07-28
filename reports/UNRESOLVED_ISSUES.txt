@@ -1,0 +1,17 @@
+Unresolved issues after the zero-gated no-op integration
+
+1. The local checkout has no target tokenizer/checkpoint. Default expected IDs
+   32001 and 32004 are configuration expectations only. Actual validation will run
+   at initialize_vision_tokenizer with a real tokenizer and must succeed before an
+   enabled path is used.
+2. The navigation integration fixture is fully exercised with synthetic tensors on
+   /home/yons2/miniconda3/envs/navid/bin/python (PyTorch 2.0.1+cu118 and
+   Transformers 4.31.0): 6 tests pass, with no failures, errors, or skips. It does
+   not load a real vision tower or a 7B checkpoint.
+3. This change intentionally contains no TST/NST encoder, instruction/action inputs,
+   auxiliary heads, action/Agent changes, generation forwarding changes, or cache
+   changes. delta_topo/delta_nav are fixed zeros.
+4. Existing history semantics are retained: history contains the current frame at
+   low resolution and final_token_length_lst remains only existing metadata. No
+   visual cache or merge format was changed; no Habitat, training, or evaluation
+   was run.

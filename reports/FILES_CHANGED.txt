@@ -1,0 +1,43 @@
+TopoCorrect zero-gated no-op integration — changed files
+
+Source
+1. topocorrect_navid/__init__.py
+2. topocorrect_navid/model/__init__.py
+3. topocorrect_navid/model/state_tokens.py
+   - TopoCorrectStateModule, lines 7-50.
+   - Defines model.topocorrect_state.topo_gate and nav_gate as scalar nn.Parameter
+     values initialized with torch.zeros(()), lines 15-18.
+   - build_zero_topo_delta/build_zero_nav_delta return zeros_like, lines 20-24.
+   - The required subtraction formula is implemented at lines 26-32.
+   - validate_tokenizer_ids uses both convert_tokens_to_ids and encode; a mismatch
+     or non-single-token encoding raises RuntimeError, lines 34-50.
+4. uninavid/model/language_model/llava_llama_vid.py
+   - LlavaConfig defaults, lines 39-54, including use_topocorrect_tokens=False
+     and expected token-ID configuration values. These are expected values, not
+     locally measured tokenizer IDs.
+   - LlavaAttLlamaModel owns the module at model.topocorrect_state, lines 56-61;
+     ordinary full-model state_dict keys therefore have the required prefix.
+5. uninavid/model/uninavid_arch.py
+   - prepare_inputs_labels_for_multimodal accepts a direct optional test override,
+     lines 383-384, and selects the config default at lines 452-457.
+   - The navigation-only token order/ID validation and TST replacement occur at
+     lines 504-545; NST replacement occurs at lines 597-612.
+   - initialize_vision_tokenizer invokes actual tokenizer validation after the
+     special tokens are added, lines 692-699.
+   - token_generation, process_tensor, online_process_tensor, feat_cache, and
+     long_feat_cache were not changed.
+
+Tests
+6. tests/test_topocorrect_noop.py
+7. tests/test_topocorrect_checkpoint.py
+8. tests/test_topocorrect_navigation_integration.py
+   - `_Backbone.get_vision_tower()` now returns a non-None `_DummyVisionTower`,
+     lines 26-41. The dummy raises AssertionError if called; the harness continues
+     to supply synthetic encoded image features through `encode_images`, lines 68-69.
+
+No tokenizer vocabulary, sentinel, Agent, generation forwarding, vision cache, or
+history merge logic was modified.
+
+Validation environment: /home/yons2/miniconda3/envs/navid/bin/python;
+PyTorch 2.0.1+cu118; Transformers 4.31.0. No 7B checkpoint, real vision tower,
+Habitat, training, or evaluation was loaded or run.

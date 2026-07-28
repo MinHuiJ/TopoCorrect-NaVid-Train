@@ -1,0 +1,19 @@
+Checkpoint roundtrip test
+
+Test: tests/test_topocorrect_checkpoint.py:13-29
+Command:
+  python -m unittest tests/test_topocorrect_checkpoint.py -v
+Result: PASS.
+
+The test writes a normal torch state_dict payload to an in-memory buffer, restores
+it into a fresh TopoCorrectStateModule, and verifies topo_gate=0.25 and
+nav_gate=-0.5 exactly after load. It also preserves use_topocorrect_tokens=True in
+the serialized config payload.
+
+Actual full-model parameter prefix: model.topocorrect_state.topo_gate and
+model.topocorrect_state.nav_gate, because LlavaAttLlamaModel owns the module at
+uninavid/model/language_model/llava_llama_vid.py:59-61.
+
+No complete model checkpoint was loaded. A full Llama/Uni-NaVid save_pretrained /
+from_pretrained roundtrip remains unexecuted locally because transformers is absent
+and this task forbids dependency installation and full 7B loading.

@@ -1,0 +1,34 @@
+Token-position validation for zero-gated replacement
+
+Implementation: uninavid/model/uninavid_arch.py,
+UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal.
+
+When use_topocorrect_tokens=False, lines 504-545 and 597-612 retain the original
+embedding path and do not call TopoCorrectStateModule.
+
+When enabled, the navigation branch requires exactly one configured
+</video_special> at IMAGE_TOKEN_INDEX + 1, exactly one configured [Navigation] at
+IMAGE_TOKEN_INDEX + 4, and configured <image_special>/</image_special> at +2/+3;
+otherwise it raises RuntimeError. The TST replaces only the base embedding for
+</video_special>; NST replaces only the base embedding for [Navigation].
+
+The resulting order is unchanged:
+prefix | history visual groups | TST | <image_special> | current 64 visual tokens |
+</image_special> | NST | instruction/suffix
+
+Both replacements have shape [1, C] because they are built from the corresponding
+base token embedding. Neither code path appends an embedding position. Labels and
+attention mask use the original construction and therefore retain their length.
+
+Expected configuration IDs default to 32001/32002/32003/32004, but they are not
+claimed as locally measured. At tokenizer initialization,
+TopoCorrectStateModule.validate_tokenizer_ids (topocorrect_navid/model/state_tokens.py:34-50)
+uses tokenizer.convert_tokens_to_ids and tokenizer.encode(add_special_tokens=False).
+Any expected-ID mismatch or multi-token encoding raises RuntimeError.
+
+Validated with /home/yons2/miniconda3/envs/navid/bin/python (PyTorch 2.0.1+cu118,
+Transformers 4.31.0): all six tests ran and passed. The real-branch synthetic test
+verified baseline and zero-gated replacement sequence length = 77 / 77, maximum
+absolute inputs_embeds error = 0.0, labels equality, attention-mask equality, and
+the malformed [Navigation] RuntimeError. No 7B checkpoint, real vision tower,
+Habitat, training, or evaluation was loaded or run.

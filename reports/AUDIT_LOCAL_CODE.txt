@@ -1,0 +1,153 @@
+TopoCorrect-NaVid 本地代码只读审计（Step 1）
+审计时间：2026-07-28（Asia/Shanghai）
+范围：仅当前 checkout 的静态源码检查；未加载权重、未启动训练、未运行 Habitat、未修改源码。
+
+0. Checkout 事实
+仓库：/home/yons2/Navid/TopoCorrect-NaVid-Train
+分支：feature/two-internal-state-tokens-v1
+HEAD：7cacf0946f7404f92f9610d5e01eae7173546e6c
+HEAD 提交：Add TopoCorrect two-token implementation specification
+工作树（审计开始时）：干净。该提交只新增任务书；尚无 TST/NST 实现。
+证据：git 元数据；任务书为该提交唯一变更。
+
+1. 真实模型入口、接口和调用关系
+1.1 类与函数
+- `LlavaLlamaAttForCausalLM.forward(...)`：uninavid/model/language_model/llava_llama_vid.py:59-125。
+  参数实际为 input_ids, attention_mask, past_key_values, inputs_embeds, labels,
+  use_cache, output_attentions, output_hidden_states, images, prompts, return_dict；没有
+  instruction_ids、instruction_attention_mask、action_history、action_history_mask，或任何
+  TopoCorrect 开关。它在第85行调用 prepare_inputs_labels_for_multimodal(..., images,
+  prompts=prompts)，第89-98行再调用 LlamaModel。
+- `LlavaLlamaAttForCausalLM.prepare_inputs_for_generation(...)`：同文件:127-147。
+  实际接口为 (input_ids, past_key_values=None, attention_mask=None,
+  inputs_embeds=None, **kwargs)。仅显式输出 past_key_values/use_cache/attention_mask/images
+  （:139-146）；其它 kwargs 不转发。`prompts` 也不转发，评测路径依赖 update_prompt 保存的
+  `self.prompts`（uninavid/model/uninavid_arch.py:379-380、398-399）。
+- `UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal(...)`：
+  uninavid/model/uninavid_arch.py:383-649，实际接口为
+  (input_ids, attention_mask, past_key_values, labels, images, prompts=None)，返回五元组
+  (None, attention_mask, past_key_values, new_input_embeds, new_labels)（:649）。
+- `UniNaVIDMetaForCausalLM.encode_images(...)`：同文件:230-243，调用
+  `vlm_attention`（:239-242）。`vlm_attention(...)`：:247-331，逐 prompt 调用
+  `token_generation(...)`（:283-287）。`token_generation(...)`：:335-375。
+- `generate()` 没有本仓库覆写；继承 transformers 的 GenerationMixin/LlamaForCausalLM。
+  当前 generation 首步会经本类 prepare_inputs_for_generation；所以调用者可把 `images`
+  传入（offline_eval_uninavid.py:117-124），但除 use_cache、attention_mask、images 外的
+  附加字段会在 llava_llama_vid.py:139-146 被丢弃，不能抵达 forward。inputs_embeds 只在
+  首步保留（:133-137）。
+
+2. 视觉 token 的真实生成、shape 与边界
+2.1 可从源码确认的 shape
+- 视觉塔输出注释为 `(n, 257, 1408)`，且 patch 模式时删除第一个 CLS：
+  uninavid/model/uninavid_arch.py:230-238、280-282。因此此处常见输入为 `(n,256,1408)`；
+  1408 是源码注释，非当前 checkout 的 checkpoint config 实测。
+- `token_generation` 的 `process_grid` 将 `(frames, P, D)` 重塑为方形、avg pool 后返回
+  `(frames, grid_size^2, D)`（:338-349）。一般图片/无 image_counts 为 grid 8，即
+  `(frames,64,D)`（:354-355）；导航同时产生最后一帧 grid 8 的当前 token `(1,64,D)`
+  （:356-360），历史/全视频按 config grid，例如 grid:2 为 `(frames,4,D)`（:352、360）。
+- 投影 `mm_projector` 发生在 token_generation :366；项目器定义为
+  Linear(config.mm_hidden_size, config.hidden_size)，或首层该映射的 MLP：
+  uninavid/model/multimodal_projector/builder.py:33-46。故投影后通道为 C=config.hidden_size；
+  当前仓库没有 Uni-NaVid checkpoint config，不能静态实测 C=4096。
+- 导航分支明确断言当前 token 为 64：uninavid/model/uninavid_arch.py:295-296、503-504。
+
+2.2 历史与当前生成过程
+- 导航由 prompt[0] 包含 NAVIGATION_IDENTIFIER 判定（uninavid/model/uninavid_arch.py:275-290；
+  常量文本在 uninavid/constants.py:20-22）。最后观测被单独取出并 grid:8，作为
+  `vis_embed_nav`；全部帧（包含最后一帧）仍按 history grid 压缩并投影（:356-373）。
+  因而“历史”输入给 LLM 实际包含到当前帧的低分辨率版本，另有同一最后帧的 64-token
+  Navigation 版本；它不是严格排除当前帧的 history。
+- 训练/非 eval：`process_tensor(final_token, nav_size)`（:301-303）；k<=64 时按每帧返回
+  group lengths `[nav_size]*k`（:168-179），超过时旧帧先均值为单 token，并可按相似度继续
+  合并（:181-224）。
+- eval：`online_process_tensor(nav_size)`（:298-300）；投影后的 `feat_cache` 保存为
+  `(k,m,C)`，k 为累计帧、m=nav_size（:113-122、369-371）。超过64帧时旧短期帧先均值为
+  `(C,)`，相似帧可合进 `long_feat_cache` 的单 token（:133-157）。
+- 结论：边界只以 `final_token_length_lst/result_list` 临时保留；近期帧为每帧 4（grid:2）
+  或16（grid:4）个 token，长时合并节点为1 token。长时每个单 token 可能汇聚多个帧，
+  因此不保留“每原始帧”边界。缓存没有保存每个合并节点覆盖的原始帧数。
+
+3. feat_cache / long_feat_cache / online_process_tensor
+- 初始化/清空：`UniNaVIDMetaModel.initialize_online_inference_nav_feat_cache`，
+  uninavid/model/uninavid_arch.py:53-57；agent reset 调用：offline_eval_uninavid.py:141-155。
+- 写入 feat_cache：token_generation :368-371（eval 时将旧 cache 与本次投影 vis_embed
+  concat 后回写）。读取及 long_feat_cache 读写：online_process_tensor :113-163。
+- `new_frames` 由 agent process_images 设为本轮 RGB 数：offline_eval_uninavid.py:50-57；
+  online merge 循环使用该值：uninavid/model/uninavid_arch.py:127-151。
+- 风险结论：当前缓存装的是投影视觉 token，未装 TST/NST（尚无实现）。但若后续在
+  token_generation :368-371 前后把 TST/NST 混入 `vis_embed`，它们会进入 feat_cache，并在
+  :133 的 mean/相似度合并中污染视觉 memory。状态模块应在 :299 返回的最终 history memory
+  形成后读取，且其输出只能在 :516-518 及尾部特殊 token embedding 位置替换，绝不可回写 cache。
+
+4. 特殊 token、IMAGE_TOKEN_INDEX 与序列拼接
+- 常量字符串和 `IMAGE_TOKEN_INDEX=-200`：uninavid/constants.py:10、16-22。
+  `tokenizer_image_token` 将每个 `<image>` 变为该 sentinel：uninavid/mm_utils.py:185-204。
+  `<image>` 不在 token vocabulary 的结论可由此 sentinel 替换实现确认。
+- 六个特殊 token 的添加顺序为 video_start, video_end, image_start, image_end,
+  navigation, image_sep：uninavid/model/uninavid_arch.py:650-652。训练/评测均用 tokenizer
+  编码它们（uninavid/train/train.py:636-641；offline_eval_uninavid.py:71-76）。
+- 任务书声称的 ID 32000..32005（docs/...:134-139）与该添加顺序一致，且该 ID 数值也仅在
+  任务书出现；当前 checkout 不含 Uni-NaVid checkpoint、tokenizer.model、tokenizer_config.json
+  或 special_tokens_map.json。因此不能仅凭本地源码确认任何一个“实际 tokenizer ID”，包括
+  `</video_special>=32001`、`[Navigation]=32004`、`<image_sep>=32005`；须在后续用目标 checkpoint
+  tokenizer 的 convert_tokens_to_ids/tokenize 实测并校验单 token。不得把任务书数值误报为实测。
+- 导航 prompt 组装：训练在 uninavid/train/train.py:648-663，评测在
+  offline_eval_uninavid.py:88-105。IMAGE_TOKEN_INDEX 前后被插为：
+  `... <video_special> <image_sep> IMAGE_TOKEN_INDEX </video_special> <image_special>
+  </image_special> [Navigation] ...`。
+- 真正 embedding 拼接（导航分支）在 uninavid/model/uninavid_arch.py:500-519：
+  prefix（至 IMAGE_TOKEN_INDEX 前，含 `<video_special> <image_sep>`）+ 历史视觉 groups，
+  groups 间追加 IMAGE_TOKEN_INDEX 前一 token（即 `<image_sep>`）(:505-515) +
+  `embed_tokens(input_ids[image_start+1:image_start+3])`（即 `</video_special>, <image_special>`）
+  (:516-517) + 当前 Navigation 64 visual tokens (:518) + 剩余文字（从 original sentinel 后
+  第3个 token 起，即 `</image_special>, [Navigation], instruction/suffix`）(:555-569)。
+  因此实际核心顺序为：
+  `<video_special>, <image_sep>, history groups separated by <image_sep>, </video_special>,
+   <image_special>, current-64, </image_special>, [Navigation], instruction/suffix`。
+  labels 对视觉/history separators/current plus two intervening tokens使用 IGNORE_INDEX，见 :539-549。
+
+5. TST/NST 等长可行性与现有冲突
+- 可行：在上述 navigation 分支中，`</video_special>` 位于 :516-517 的两 token slice 中，
+  `[Navigation]` 位于 :555-569 的尾部 text embedding。两者已经各占一个 embedding 位置；
+  在其各自 token ID 已验证为单 token 后，用 `[1,C]` 替换原 embedding 可做到不增 sequence
+  length、attention_mask 或 labels。现有 padding/mask 逻辑见 :599-647。
+- 不能直接照任务书的“定位”说法实施：当前代码没有搜索/校验 video_end 或 navigation token ID，
+  完全依赖 prompt 插入次序及 `image_token_start+1:+3`、`+3:` 固定偏移（:516-518、555-558）。
+  第一处建议修改位置为 `UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal`，
+  uninavid/model/uninavid_arch.py:500，先在 navigation 分支从 `cur_input_ids` 明确定位并验证
+  `</video_special>` 与 `[Navigation]`，同时保持现有 embedding/label 长度；这是接入 TST/NST
+  的最早、最小且不触碰视觉缓存的位置。
+- 历史 group metadata 冲突：任务书要求生成阶段显式产出 history_visual_tokens、
+  history_group_lengths、current_visual_tokens（docs/...:805-810），但当前
+  `encode_images/vlm_attention` 仅返回 image_features、video_or_not、nav_or_not、
+  final_token_length_lst（uninavid/model/uninavid_arch.py:230-243、247-331）。虽有 lengths list，
+  没有结构化/按 batch 暴露给 state encoder，且长时节点的原始帧覆盖范围已丢失。
+- 接口冲突：任务书要求的 forward/generation 状态字段（docs/...:728-760）不在真实 forward
+  或 prepare_inputs_for_generation 中；当前 generate 也不会透传它们。
+- 视觉语义冲突：任务书写“history visual tokens + current 64”，但当前 history token pipeline
+  包含最后/current frame 的 grid:2/4版本（:356-360），须明确是允许重叠还是修改为严格历史。
+
+6. Checkpoint 初始化结论
+- 当前模型类是 `LlavaLlamaAttForCausalLM`，其结构只有 Llama backbone、vision tower 和
+  mm_projector；构造证据：uninavid/model/language_model/llava_llama_vid.py:38-52，视觉模块
+  初始化：uninavid/model/uninavid_arch.py:39-45。不存在 TST/NST 参数或 config 字段。
+- 本地未提供任何 NaVid/Uni-NaVid checkpoint（git tree 仅有 processor config，README 将
+  Uni-NaVid 7B 权重列为另行下载：README.md:65-92），所以不能对具体 checkpoint 实际
+  from_pretrained 成功与否作实测结论，且本审计依约未加载 7B。
+- 从加载代码可确认：名称含 `vid` 且 model_base 为 None 时调用
+  `LlavaLlamaAttForCausalLM.from_pretrained(model_path, ...)`（uninavid/model/builder.py:42-57）。
+  因此与当前未改结构、匹配 config 的 Uni-NaVid checkpoint 在代码路径上被设计为可初始化；
+  “NaVid checkpoint”若指不同项目/不同 config/词表/vision tower，源码没有兼容适配或实物，
+  暂无法确认。未来新增 TST/NST 参数后，旧 checkpoint 不含这些键；能否容忍 missing keys
+  取决于 transformers from_pretrained 默认加载行为及目标 checkpoint，须在不加载完整权重的
+  合成/metadata 测试阶段单独验证，不能在本审计中宣称已验证。
+
+7. 已确认 / 暂无法确认摘要
+已确认：没有 TST/NST；实际调用链、固定导航拼接、IMAGE_TOKEN_INDEX=-200、64 current token
+断言、history group lengths 的短期表示、online long-term 1-token merging、cache 写入点，以及
+generation 只转发 images 等字段均如上述源码行号。
+暂无法确认：目标 checkpoint 的 six token 实际 ID、hidden_size=4096、EVA实际特征维度、某个
+NaVid checkpoint 是否与当前 Uni-NaVid config/词表完全匹配；这些资产不在 checkout，且本轮
+限制禁止加载 7B 权重。
+
+审计停止点：仅新增本报告；未执行任务书 Step 2 或以后步骤。

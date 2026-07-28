@@ -26,6 +26,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from uninavid.model.uninavid_arch import UniNaVIDMetaModel, UniNaVIDMetaForCausalLM
 from uninavid.constants import NAVIGATION_IDENTIFIER
+from topocorrect_navid.model import TopoCorrectStateModule
 
 import os
 print("Setting WANDB_MODE to offline")
@@ -35,11 +36,29 @@ os.environ["WANDB_MODE"] = "offline"
 class LlavaConfig(LlamaConfig):
     model_type = "llava"
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.use_topocorrect_tokens = getattr(self, "use_topocorrect_tokens", False)
+        self.topocorrect_state_hidden_size = getattr(self, "topocorrect_state_hidden_size", 512)
+        self.topocorrect_max_topo_nodes = getattr(self, "topocorrect_max_topo_nodes", 64)
+        self.topocorrect_max_action_history = getattr(self, "topocorrect_max_action_history", 32)
+        self.topocorrect_topo_layers = getattr(self, "topocorrect_topo_layers", 2)
+        self.topocorrect_topo_heads = getattr(self, "topocorrect_topo_heads", 8)
+        self.topocorrect_nav_heads = getattr(self, "topocorrect_nav_heads", 8)
+        self.topocorrect_dropout = getattr(self, "topocorrect_dropout", 0.1)
+        self.topocorrect_topo_gate_init = getattr(self, "topocorrect_topo_gate_init", 0.0)
+        self.topocorrect_nav_gate_init = getattr(self, "topocorrect_nav_gate_init", 0.0)
+        self.topocorrect_video_end_token_id = getattr(self, "topocorrect_video_end_token_id", 32001)
+        self.topocorrect_image_start_token_id = getattr(self, "topocorrect_image_start_token_id", 32002)
+        self.topocorrect_image_end_token_id = getattr(self, "topocorrect_image_end_token_id", 32003)
+        self.topocorrect_navigation_token_id = getattr(self, "topocorrect_navigation_token_id", 32004)
+
 class LlavaAttLlamaModel(UniNaVIDMetaModel, LlamaModel):
     config_class = LlavaConfig
 
     def __init__(self, config: LlamaConfig):
         super(LlavaAttLlamaModel, self).__init__(config)
+        self.topocorrect_state = TopoCorrectStateModule(config)
 
 class LlavaLlamaAttForCausalLM(LlamaForCausalLM, UniNaVIDMetaForCausalLM):
     config_class = LlavaConfig
