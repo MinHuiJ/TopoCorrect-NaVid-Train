@@ -1,0 +1,1292 @@
+TopoCorrect-NaVid 模型内部双状态 Token 第一版代码实施任务书
+文件用途：直接交给 Codex 执行
+版本：v3.0（Implementation Only）
+目标：先完成第一版代码接入，不训练、不做实验、不运行完整 Habitat 评测
+目标基线：NaVid / 官方 Uni-NaVid 代码
+核心约束：严格两个动态状态 Token；模型内部建模；无外部 prompt 纠错；无动作 override；无推理期 GT
+
+======================================================================
+0. 本轮任务范围
+======================================================================
+
+本轮只完成“第一版可运行代码结构”，不启动训练，不做指标实验。
+
+本轮必须实现：
+
+1. TST：Topological Spatial State Token
+2. NST：Landmark-aware Navigation State Token
+3. NaVid / Uni-NaVid 模型调用链接入
+4. Agent 的 instruction_ids 和 action_history 输入
+5. 两个状态 Token 对现有特殊 Token embedding 的等长替换
+6. 配置字段
+7. 新模块保存与加载
+8. 合成张量单元测试
+9. 不含 Habitat 的 model forward / generate smoke test
+10. 完整代码审计与修改报告
+
+本轮明确不做：
+
+1. 不启动任何正式训练。
+2. 不写两卡 DDP / DeepSpeed / LoRA / QLoRA 训练命令。
+3. 不生成训练数据。
+4. 不制作训练标签。
+5. 不运行 100 batch 训练。
+6. 不运行 16 个失败 episode。
+7. 不运行 val_seen / val_unseen。
+8. 不做 baseline、TST-only、NST-only、TST+NST 消融。
+9. 不比较 SR、SPL、DTG。
+10. 不修改当前稳定 NaVid-VLN-CE 评测工程。
+11. 不实现外部 self-correction wrapper。
+12. 不实现强制动作覆盖。
+
+训练、数据构造和实验由用户后续自行进行。
+Codex 本轮不得擅自启动训练或 Habitat 评测。
+
+======================================================================
+1. 任务目标
+======================================================================
+
+在 NaVid 的 LLM 输入序列中实现且仅实现两个动态连续状态 Token：
+
+1. Topological Spatial State Token（TST）
+   符号：z_topo_t
+   作用：表示仅由 RGB 历史、当前 RGB 和已执行动作推断的非深度拓扑空间状态。
+
+2. Landmark-aware Navigation State Token（NST）
+   符号：z_nav_t
+   作用：表示当前视觉轨迹在指令中的执行阶段、landmark 对齐、进展、偏航/停滞和停止准备状态。
+
+两个 Token 都必须：
+
+    每个导航 step 动态生成
+    shape = [B, 1, 4096]
+    不增加 tokenizer vocabulary
+    不改变原始输入序列长度
+    不作为文本 prompt
+    不直接覆盖动作
+    不读取推理期 GT
+
+最终动作仍由：
+
+    NaVid 原 lm_head
+    -> 自回归动作文本
+    -> 原 agent extract_result()
+    -> Habitat 低层动作
+
+======================================================================
+2. 设计原则：不是对 NaVid 原 Token 换名字
+======================================================================
+
+TST 和 NST 的原始证据来自 NaVid 已有视觉 Token、语言 Token 和动作历史。
+
+但禁止以下伪实现：
+
+    mean pooling
+    -> Linear / MLP
+    -> 重命名为 TST / NST
+
+如果只做 pooling + MLP，则没有实现本设计。
+
+第一版必须包含：
+
+TST：
+    历史视觉节点恢复
+    当前视觉摘要
+    已执行动作历史编码
+    历史节点间视觉相似关系
+    时间距离关系
+    temporal adjacency
+    relation-aware Transformer
+    learned topology query
+
+NST：
+    原始指令 token 独立输入
+    token-level 视觉—指令 cross-attention
+    landmark token probability
+    landmark-aware attention bias
+    TST 条件输入
+    动作历史条件输入
+    learned navigation query
+
+NaVid 原视觉 Token 是底层视觉证据。
+新模块增加的是：
+
+    显式历史关系建模
+    显式动作状态建模
+    显式视觉—语言对齐
+    显式 landmark-aware 状态压缩
+
+======================================================================
+3. 已确认的 NaVid / Uni-NaVid 接口约束
+======================================================================
+
+已知模型规格：
+
+    LLM hidden size = 4096
+    EVA feature dim = 1408
+    mm_projector = 1408 -> 4096 -> 4096
+    历史帧在 grid:2 下通常每帧 4 个视觉 Token
+    当前 Navigation 帧通常保留 64 个视觉 Token
+    tokenizer vocabulary size = 32006
+
+原有特殊 Token 审计值：
+
+    <video_special>  = 32000
+    </video_special> = 32001
+    <image_special>  = 32002
+    </image_special> = 32003
+    [Navigation]     = 32004
+    <image_sep>      = 32005
+
+<image> 不占词表 ID。
+它在 tokenizer_image_token() 中转换为：
+
+    IMAGE_TOKEN_INDEX = -200
+
+实现不得仅依赖硬编码 Token ID。
+初始化或测试时必须用实际 tokenizer 核对：
+
+    </video_special> == 32001
+    [Navigation] == 32004
+
+不一致时必须 RuntimeError，不能静默继续。
+
+======================================================================
+4. 最终 Token 插入方案
+======================================================================
+
+不新增 -201 / -202 sentinel。
+不新增 tokenizer Token。
+不增加输入序列长度。
+
+复用两个已有特殊 Token 的 embedding 位置：
+
+1. TST 替换 </video_special> 的 embedding。
+2. NST 替换 [Navigation] 的 embedding。
+
+原始多模态序列核心部分：
+
+    历史视觉 Token
+    </video_special>
+    <image_special>
+    当前 64 个视觉 Token
+    </image_special>
+    [Navigation]
+    指令 Token
+
+修改后：
+
+    历史视觉 Token
+    TST
+    <image_special>
+    当前 64 个视觉 Token
+    </image_special>
+    NST
+    指令 Token
+
+TST：
+
+    TST =
+        E(</video_special>)
+        + tanh(topo_gate) * delta_topo
+
+NST：
+
+    NST =
+        E([Navigation])
+        + tanh(nav_gate) * delta_nav
+
+要求：
+
+    topo_gate = nn.Parameter(torch.zeros(()))
+    nav_gate  = nn.Parameter(torch.zeros(()))
+
+因此：
+
+    use_topocorrect_tokens=False
+        -> 完全走原始路径
+
+    use_topocorrect_tokens=True 且 gate=0
+        -> embedding 数值等价原始特殊 Token
+        -> sequence length 不变
+        -> position 分布不变
+
+TST/NST 不允许写入：
+
+    feat_cache
+    long_feat_cache
+
+状态模块必须在 Uni-NaVid 的最终 history memory 形成后读取视觉 Token。
+
+======================================================================
+5. TST：Topological Spatial State Token
+======================================================================
+
+输出：
+
+    z_topo_t: [B, 1, 4096]
+
+输入：
+
+    history_visual_tokens: [B, L_h, 4096]
+    history_group_lengths
+    current_visual_tokens: [B, 64, 4096]
+    action_history: [B, K]
+    action_history_mask: [B, K]
+
+TST 禁止读取：
+
+    instruction_ids
+    GT pose
+    GT heading
+    depth
+    top-down map
+    distance-to-goal
+    shortest-path action
+    success / SPL
+    oracle stop
+
+----------------------------------------------------------------------
+5.1 历史节点恢复
+----------------------------------------------------------------------
+
+不能对全部历史 Token 做一次全局均值。
+
+必须按 history_group_lengths 分段：
+
+    history group 1 -> node_1
+    history group 2 -> node_2
+    ...
+    history group M -> node_M
+
+NaVid 常规历史帧通常每组 4 个 Token。
+Uni-NaVid 合并后的旧节点可能只有 1 个 Token。
+代码必须兼容变长 group。
+
+每组使用：
+
+    masked attention pooling
+
+第一版允许在 attention pooling 不可用时提供 masked mean fallback，
+但必须在实现报告中说明。
+
+节点数：
+
+    max_topo_nodes = 64
+
+超出后保留：
+
+    起点节点 1 个
+    最近节点 63 个
+
+不得建立跨 episode module 全局 mutable map。
+
+----------------------------------------------------------------------
+5.2 当前视觉摘要
+----------------------------------------------------------------------
+
+输入：
+
+    current_visual_tokens: [B, 64, 4096]
+
+使用 AttentionPool：
+
+    current_summary: [B, 4096]
+
+投影：
+
+    current_node: [B, 512]
+
+----------------------------------------------------------------------
+5.3 动作历史编码
+----------------------------------------------------------------------
+
+动作 ID：
+
+    PAD=0
+    START=1
+    STOP=2
+    FORWARD=3
+    LEFT=4
+    RIGHT=5
+
+默认：
+
+    max_action_history = 32
+    action_embedding_dim = 128
+
+第一版固定使用：
+
+    1-layer GRU
+
+输出：
+
+    action_summary: [B, 512]
+
+动作历史只包含真正已执行的动作。
+包括从 pending_action_list 中弹出并实际执行的动作。
+不包含本次尚未执行的预测动作。
+
+----------------------------------------------------------------------
+5.4 节点特征
+----------------------------------------------------------------------
+
+每个节点先得到：
+
+    node_visual: [B, 4096]
+
+投影至 512：
+
+    W_visual(node_visual)
+
+加入相对时间特征：
+
+    E_relative_age
+
+加入与当前视觉的关系特征：
+
+    cosine(node_i, current_summary)
+    normalized_age
+    is_first_node
+    is_recent_node
+
+关系标量经 MLP 投影后加入节点表示。
+
+最终：
+
+    x_i: [B, 512]
+
+----------------------------------------------------------------------
+5.5 Relation-aware Transformer
+----------------------------------------------------------------------
+
+对历史节点 i,j 计算：
+
+    visual_similarity_ij
+        = cosine(node_i, node_j)
+
+    temporal_distance_ij
+        = abs(i-j) / max(M-1, 1)
+
+    temporal_adjacent_ij
+        = 1 if abs(i-j) == 1 else 0
+
+关系向量：
+
+    relation_ij = [
+        visual_similarity_ij,
+        temporal_distance_ij,
+        temporal_adjacent_ij
+    ]
+
+RelationMLP 输出：
+
+    relation_bias: [B, 8, M, M]
+
+Attention：
+
+    attention_logits =
+        QK^T / sqrt(d)
+        + relation_bias
+
+配置：
+
+    state_hidden_size = 512
+    topo_layers = 2
+    topo_heads = 8
+    ffn_dim = 2048
+    dropout = 0.1
+
+输入序列：
+
+    [
+      learned_topo_query,
+      node_1 ... node_M,
+      current_node,
+      action_summary
+    ]
+
+必须为 query/current/action 位置补充合理的 attention bias：
+    可使用 0 bias；
+    历史节点间使用 relation bias。
+
+取 learned_topo_query 输出：
+
+    h_topo: [B, 512]
+
+投影：
+
+    delta_topo =
+        LayerNorm(
+            MLP_512_to_4096(h_topo)
+        )
+
+最终：
+
+    z_topo_t =
+        base_video_end_embedding
+        + tanh(topo_gate) * delta_topo
+
+----------------------------------------------------------------------
+5.6 第一版 TST 辅助输出
+----------------------------------------------------------------------
+
+本轮不训练，但模块 forward 必须返回 logits，供后续训练使用：
+
+    revisit_logits: [B, 1]
+    novelty_logits: [B, 1]
+    stagnation_logits: [B, 1]
+
+可选：
+
+    repeated_turn_logits
+    spatial_progress_logits
+
+本轮只实现 head 和 shape，不生成标签、不计算正式训练损失。
+
+======================================================================
+6. NST：Landmark-aware Navigation State Token
+======================================================================
+
+输出：
+
+    z_nav_t: [B, 1, 4096]
+
+输入：
+
+    instruction_ids: [B, L_i]
+    instruction_attention_mask: [B, L_i]
+    current_visual_tokens: [B, 64, 4096]
+    action_summary: [B, 512]
+    h_topo: [B, 512]
+
+NST 禁止使用：
+
+    人工状态 prompt
+    GT instruction progress 作为输入
+    GT landmark stage 作为输入
+    distance-to-goal 作为输入
+    oracle stop 作为输入
+
+----------------------------------------------------------------------
+6.1 原始指令独立编码
+----------------------------------------------------------------------
+
+instruction_ids 必须只对应原始导航指令。
+
+不得使用整个 Vicuna conversation prompt。
+不得依赖固定英文模板切片。
+不得在模型内部从 prompt 字符串反向解析指令。
+
+编码：
+
+    instruction_embeds =
+        model.embed_tokens(instruction_ids)
+
+投影：
+
+    instruction_hidden =
+        W_instruction(instruction_embeds)
+
+shape：
+
+    instruction_hidden: [B, L_i, 512]
+
+----------------------------------------------------------------------
+6.2 Landmark Token Head
+----------------------------------------------------------------------
+
+必须实现：
+
+    landmark_logits =
+        LandmarkTokenHead(instruction_hidden)
+
+shape：
+
+    landmark_logits: [B, L_i]
+
+推理值：
+
+    landmark_prob = sigmoid(landmark_logits)
+
+本轮不生成 landmark 标签，不训练该 head。
+但 forward 返回 landmark_logits。
+
+----------------------------------------------------------------------
+6.3 导航 Query
+----------------------------------------------------------------------
+
+当前视觉：
+
+    current_summary =
+        AttentionPool(current_visual_tokens)
+
+构造：
+
+    q_nav =
+        learned_nav_query
+        + W_current(current_summary)
+        + W_topo(h_topo)
+        + W_action(action_summary)
+
+shape：
+
+    q_nav: [B, 512]
+
+----------------------------------------------------------------------
+6.4 Landmark-aware Instruction Attention
+----------------------------------------------------------------------
+
+Q：
+
+    q_nav
+
+K/V：
+
+    instruction_hidden
+
+基础 attention：
+
+    QK^T / sqrt(d)
+
+加入 landmark bias：
+
+    attention_logits =
+        QK^T / sqrt(d)
+        + landmark_bias_scale
+          * log(landmark_prob + eps)
+
+必须应用 instruction_attention_mask。
+
+输出：
+
+    instruction_pointer: [B, L_i]
+    instruction_context: [B, 512]
+
+禁止将整句 instruction 直接 mean pooling 作为正式实现。
+
+----------------------------------------------------------------------
+6.5 导航状态融合
+----------------------------------------------------------------------
+
+使用：
+
+    q_nav
+    instruction_context
+    h_topo
+    action_summary
+
+构造：
+
+    h_nav =
+        LayerNorm(
+            q_nav
+            + instruction_cross_attention
+            + FFN(
+                concat(
+                    q_nav,
+                    instruction_context,
+                    W_topo(h_topo),
+                    W_action(action_summary)
+                )
+              )
+        )
+
+输出：
+
+    h_nav: [B, 512]
+
+投影：
+
+    delta_nav =
+        LayerNorm(
+            MLP_512_to_4096(h_nav)
+        )
+
+最终：
+
+    z_nav_t =
+        base_navigation_embedding
+        + tanh(nav_gate) * delta_nav
+
+----------------------------------------------------------------------
+6.6 第一版 NST 辅助输出
+----------------------------------------------------------------------
+
+本轮不训练，但 forward 必须返回：
+
+    progress_logits: [B, 1]
+    stop_readiness_logits: [B, 1]
+    failure_logits: [B, 8]
+    correction_logits: [B, 1]
+    recovery_action_logits: [B, 4]
+    landmark_logits: [B, L_i]
+    instruction_pointer: [B, L_i]
+
+failure 类别顺序固定：
+
+    0 none
+    1 drift
+    2 wrong_turn
+    3 premature_stop
+    4 collision
+    5 stuck
+    6 landmark_miss
+    7 other
+
+本轮不实现 loss，不生成训练标签。
+
+======================================================================
+7. 内部自纠错约束
+======================================================================
+
+本轮禁止：
+
+    correction prompt
+    外部 self-correction verifier
+    动作 override
+    使用 recovery_action argmax 替代 LLM 输出
+    修改 pending_action_list 的原始预测语义
+
+允许：
+
+    correction_logits 作为辅助输出
+    h_topo / h_nav 通过两个动态 embedding 影响 LLM
+
+本轮默认不实现 correction modulation。
+只保留未来接口。
+
+最终动作唯一来源：
+
+    NaVid 原 lm_head
+
+======================================================================
+8. 模型调用链接入
+======================================================================
+
+建议独立工程：
+
+    ~/Navid/TopoCorrect-NaVid-Train/
+
+不要修改当前稳定：
+
+    ~/Navid/NaVid-VLN-CE
+
+基于实际 checkout 审计后修改：
+
+    uninavid/model/uninavid_arch.py
+    uninavid/model/language_model/llava_llama_vid.py
+    agent_uninavid.py 或新增 agent_topocorrect_navid.py
+
+新增：
+
+    topocorrect_navid/model/state_tokens.py
+    topocorrect_navid/model/auxiliary_heads.py
+    topocorrect_navid/model/state_outputs.py
+
+如果实际源码命名不同，以本地代码为准并记录。
+
+----------------------------------------------------------------------
+8.1 generate() 新参数
+----------------------------------------------------------------------
+
+model.generate() 增加：
+
+    instruction_ids
+    instruction_attention_mask
+    action_history
+    action_history_mask
+    use_topocorrect_tokens
+    enable_tst
+    enable_nst
+    return_topocorrect_outputs
+
+建议：
+
+    use_topocorrect_tokens=False
+        -> 两个模块均禁用
+
+    use_topocorrect_tokens=True
+    enable_tst=True
+    enable_nst=True
+        -> 双 Token
+
+    use_topocorrect_tokens=True
+    enable_tst=True
+    enable_nst=False
+        -> TST-only 接口预留
+
+    use_topocorrect_tokens=True
+    enable_tst=False
+    enable_nst=True
+        -> 第一版应禁止，因为 NST 依赖 TST
+           可使用零 h_topo 仅供未来消融，但默认 RuntimeError
+
+----------------------------------------------------------------------
+8.2 forward() 新参数
+----------------------------------------------------------------------
+
+增加：
+
+    instruction_ids=None
+    instruction_attention_mask=None
+    action_history=None
+    action_history_mask=None
+    use_topocorrect_tokens=None
+    enable_tst=None
+    enable_nst=None
+    return_topocorrect_outputs=False
+
+本轮不增加 state_labels。
+
+----------------------------------------------------------------------
+8.3 prepare_inputs_for_generation()
+----------------------------------------------------------------------
+
+必须显式转发：
+
+    instruction_ids
+    instruction_attention_mask
+    action_history
+    action_history_mask
+    use_topocorrect_tokens
+    enable_tst
+    enable_nst
+    return_topocorrect_outputs
+
+只在首个 multimodal forward 计算 TST/NST。
+后续 KV-cache 解码不能重复运行状态模块。
+
+需要添加可测试的计数器或 hook，仅用于测试：
+    state_encoder_forward_count
+
+测试结束后可保留为 debug 字段，默认关闭。
+
+----------------------------------------------------------------------
+8.4 prepare_inputs_labels_for_multimodal()
+----------------------------------------------------------------------
+
+必须接收状态输入。
+
+Navigation 分支中：
+
+1. 定位 </video_special>。
+2. 核对 Token ID。
+3. 用 TST 等长替换其 embedding。
+4. 保留 <image_special>。
+5. 插入原当前 64 个视觉 Token。
+6. 保留 </image_special>。
+7. 定位 [Navigation]。
+8. 核对 Token ID。
+9. 用 NST 等长替换其 embedding。
+10. 保留原 instruction embeddings 和 suffix。
+
+必须保证：
+
+    修改前后 sequence length 相同
+    attention_mask length 相同
+    labels length 相同
+    position 分布不因新 Token 增长而改变
+
+TST/NST 为特殊 Token embedding 的残差替换。
+不额外添加 IGNORE_INDEX。
+
+----------------------------------------------------------------------
+8.5 History Group Metadata
+----------------------------------------------------------------------
+
+TST 需要 history_group_lengths。
+
+第一版必须在视觉 Token 生成阶段同时产生：
+
+    history_visual_tokens
+    history_group_lengths
+    current_visual_tokens
+
+不能通过除以 4 猜测所有历史节点。
+原因：
+    Uni-NaVid 合并节点可能为 1 Token；
+    历史 group 长度可变。
+
+如果当前函数只返回扁平 Token：
+    修改内部返回结构；
+    但必须保持 use_topocorrect_tokens=False 时的外部返回兼容。
+
+推荐内部 dataclass：
+
+    VisualTokenBundle:
+        history_tokens
+        history_group_lengths
+        current_tokens
+        original_image_features
+
+======================================================================
+9. Agent 接口
+======================================================================
+
+reset()：
+
+    self.executed_action_history = []
+
+每次模型 generate 前：
+
+    传入此前已执行动作
+
+每次真正返回 Habitat 动作前：
+
+    将该动作记录为“待执行动作”不够；
+    必须明确在调用语义上它将被环境执行。
+
+考虑原 agent 的 act() 返回后环境立即 step，
+第一版可在 act() 返回前 append，
+但必须确保：
+    如果 act() 抛异常，不 append；
+    episode reset 清空；
+    pending action 也 append；
+    stop 也 append。
+
+最近：
+
+    max_action_history = 32
+
+指令单独 tokenize：
+
+    observations["instruction"]["text"]
+
+参数：
+
+    add_special_tokens=False
+    truncation=True
+    padding 按 batch/collator 需要
+
+不得从完整 prompt 解析指令。
+
+======================================================================
+10. 配置字段
+======================================================================
+
+config.json 新增：
+
+    "use_topocorrect_tokens": false,
+    "topocorrect_state_hidden_size": 512,
+    "topocorrect_max_topo_nodes": 64,
+    "topocorrect_max_action_history": 32,
+    "topocorrect_topo_layers": 2,
+    "topocorrect_topo_heads": 8,
+    "topocorrect_nav_heads": 8,
+    "topocorrect_dropout": 0.1,
+    "topocorrect_topo_gate_init": 0.0,
+    "topocorrect_nav_gate_init": 0.0,
+    "topocorrect_video_end_token_id": 32001,
+    "topocorrect_navigation_token_id": 32004
+
+新增参数前缀：
+
+    model.topocorrect_state.*
+
+旧 checkpoint 加载：
+
+    允许新增 state keys 缺失
+    原 NaVid / Uni-NaVid keys 必须完整加载
+    不能静默吞掉原模型 key mismatch
+
+建议输出 missing/unexpected keys 审计。
+
+======================================================================
+11. 保存与加载
+======================================================================
+
+本轮必须实现新模块 checkpoint roundtrip。
+
+至少支持：
+
+1. 完整模型 state_dict 保存/加载。
+2. state-only 保存：
+       model.topocorrect_state.*
+3. config 字段保存。
+4. topo_gate/nav_gate 保存。
+5. auxiliary heads 保存。
+
+不要求本轮：
+
+    LoRA merge
+    QLoRA
+    DeepSpeed ZeRO checkpoint
+    正式 HF 全量导出
+
+但必须保证普通：
+
+    save_pretrained()
+    from_pretrained()
+
+可以恢复新增模块，或明确实现专用 loader 并测试。
+
+======================================================================
+12. 本轮必须完成的测试
+======================================================================
+
+全部使用：
+
+    合成张量
+    tokenizer
+    小型/随机配置模型
+    或不含 Habitat 的实际模型加载
+
+不得启动 Habitat 完整评测。
+
+----------------------------------------------------------------------
+测试 1：baseline no-op
+----------------------------------------------------------------------
+
+    use_topocorrect_tokens=False
+
+要求：
+
+    inputs_embeds 与修改前路径一致
+    sequence length 一致
+    attention mask 一致
+    labels 一致
+
+----------------------------------------------------------------------
+测试 2：gate=0 no-op
+----------------------------------------------------------------------
+
+    use_topocorrect_tokens=True
+    topo_gate=0
+    nav_gate=0
+
+要求：
+
+    inputs_embeds 与 baseline 逐元素接近
+    sequence length 完全一致
+
+----------------------------------------------------------------------
+测试 3：严格两个位置
+----------------------------------------------------------------------
+
+每个 Navigation sample：
+
+    恰好 1 个 TST 替换位置
+    恰好 1 个 NST 替换位置
+
+----------------------------------------------------------------------
+测试 4：shape
+----------------------------------------------------------------------
+
+    h_topo: [B,512]
+    delta_topo: [B,4096]
+    z_topo_t: [B,1,4096]
+
+    h_nav: [B,512]
+    delta_nav: [B,4096]
+    z_nav_t: [B,1,4096]
+
+----------------------------------------------------------------------
+测试 5：变长 history groups
+----------------------------------------------------------------------
+
+覆盖：
+
+    [4,4,4]
+    [1,4,1,4]
+    超过 64 节点
+    含 padding 的 batch
+
+----------------------------------------------------------------------
+测试 6：动作历史
+----------------------------------------------------------------------
+
+覆盖：
+
+    空历史 -> START
+    pending action
+    截断到最近 32
+    reset 后清空
+    mask 正确
+
+----------------------------------------------------------------------
+测试 7：instruction mask
+----------------------------------------------------------------------
+
+覆盖：
+
+    不同长度指令
+    padding
+    全有效 Token
+    landmark logits / pointer shape
+
+----------------------------------------------------------------------
+测试 8：generation forwarding
+----------------------------------------------------------------------
+
+要求：
+
+    首个 forward 收到 instruction_ids
+    首个 forward 收到 action_history
+    后续 KV-cache step 不重复计算 TST/NST
+
+----------------------------------------------------------------------
+测试 9：Token ID 核对
+----------------------------------------------------------------------
+
+错误 tokenizer mapping 时：
+
+    RuntimeError
+
+----------------------------------------------------------------------
+测试 10：checkpoint roundtrip
+----------------------------------------------------------------------
+
+保存后重载：
+
+    state encoder 参数
+    auxiliary heads
+    topo_gate
+    nav_gate
+    config
+
+必须一致。
+
+----------------------------------------------------------------------
+测试 11：无 GT 输入
+----------------------------------------------------------------------
+
+forward/generate 签名中不得出现：
+
+    gt_pose
+    gt_heading
+    depth_gt
+    topdown_map
+    distance_to_goal
+    oracle_action
+    success
+    spl
+
+----------------------------------------------------------------------
+测试 12：模型加载 Smoke
+----------------------------------------------------------------------
+
+不使用 Habitat：
+
+    加载修改后的模型
+    构造 1 个合成 navigation batch
+    执行 forward
+    执行一次短 generate
+    输出 TST/NST shape
+    输出辅助 head shape
+
+不要求输出合理导航动作。
+只验证代码链路。
+
+======================================================================
+13. Codex 不合格实现判定
+======================================================================
+
+出现以下任一情况，本轮实现不合格：
+
+1. TST 只是全局 mean pooling + MLP。
+2. NST 只是 instruction mean + current mean + MLP。
+3. 没有历史节点恢复。
+4. 没有 history_group_lengths。
+5. 没有动作历史编码。
+6. TST 没有 relation bias。
+7. NST 没有 token-level instruction attention。
+8. NST 没有 landmark-aware bias。
+9. 生成 12+6 个状态 Token。
+10. 增加 tokenizer vocabulary。
+11. 改变原输入序列长度。
+12. 使用推理期 GT。
+13. 使用状态文本 prompt。
+14. 强制覆盖动作。
+15. 修改 pending_action_list 的原始决策逻辑。
+16. TST 读取指令。
+17. NST 不读取 TST。
+18. TST/NST 写入 feat_cache。
+19. generation 后续解码重复计算状态模块。
+20. use_topocorrect_tokens=False 不能恢复 baseline。
+21. gate=0 不能恢复 baseline。
+22. 擅自启动训练。
+23. 擅自运行 16 episode 或完整 Habitat 评测。
+
+======================================================================
+14. 第一版实施顺序
+======================================================================
+
+严格按以下顺序执行。
+
+Step 1：只读审计本地代码
+
+输出：
+
+    实际 repo 路径
+    git commit
+    相关函数和行号
+    实际 Token 顺序
+    实际 tensor shape
+    tokenizer Token ID
+    checkpoint config
+
+不得修改代码。
+
+Step 2：创建独立分支
+
+建议：
+
+    feature/two-internal-state-tokens-v1
+
+不得修改稳定评测工程。
+
+Step 3：增加配置字段和空模块
+
+先实现：
+
+    use_topocorrect_tokens
+    topo_gate
+    nav_gate
+    delta_topo=0
+    delta_nav=0
+
+通过 no-op 测试。
+
+Step 4：接通 generate 参数
+
+实现：
+
+    instruction_ids
+    instruction_attention_mask
+    action_history
+    action_history_mask
+
+通过 forwarding 测试。
+
+Step 5：实现 ActionHistoryEncoder
+
+通过动作历史单元测试。
+
+Step 6：实现 VisualTokenBundle 和 history_group_lengths
+
+通过变长 group 测试。
+
+Step 7：实现 TST
+
+包括：
+
+    节点恢复
+    当前视觉摘要
+    relation bias
+    2 层 relation-aware Transformer
+    TST heads
+
+通过 shape/no-op/checkpoint 测试。
+
+Step 8：实现 NST
+
+包括：
+
+    原始指令独立编码
+    landmark head
+    landmark-aware attention
+    TST 条件融合
+    NST heads
+
+通过 shape/mask/no-op/checkpoint 测试。
+
+Step 9：接入 Agent
+
+实现：
+
+    instruction 单独 tokenize
+    executed_action_history
+    reset
+    pending action 记录
+
+通过 agent 单元测试。
+
+Step 10：完成不含 Habitat 的 smoke test
+
+执行：
+
+    model load
+    forward
+    short generate
+
+不得继续训练或 Habitat 实验。
+
+======================================================================
+15. Codex 必须输出的报告
+======================================================================
+
+本轮只需输出：
+
+    AUDIT_LOCAL_CODE.txt
+    FILES_CHANGED.txt
+    IMPLEMENTATION_ARCHITECTURE.txt
+    STATE_TOKEN_SHAPES.txt
+    NOOP_TEST_RESULTS.txt
+    GENERATION_FORWARDING_TEST.txt
+    ACTION_HISTORY_TEST.txt
+    VARIABLE_HISTORY_GROUP_TEST.txt
+    TOKEN_ID_VALIDATION_TEST.txt
+    CHECKPOINT_ROUNDTRIP_TEST.txt
+    MODEL_LOAD_SMOKE.txt
+    UNRESOLVED_ISSUES.txt
+
+每份报告必须包含：
+
+    执行命令
+    git commit
+    环境
+    成功/失败
+    关键 shape
+    关键路径
+    关键 checksum
+    未解决问题
+
+不需要输出：
+
+    TRAIN_100_BATCH_REPORT
+    HABITAT_EPISODE_SMOKE
+    STAGNATION16_ABLATION
+    SR/SPL 结果
+
+======================================================================
+16. 第一版完成定义
+======================================================================
+
+以下条件全部满足，第一版代码才算完成：
+
+1. 实现且仅实现两个动态状态 Token。
+2. TST/NST shape 均为 [B,1,4096]。
+3. TST 包含历史节点恢复、动作编码和 relation-aware Transformer。
+4. NST 包含 token-level instruction attention、landmark bias 和 TST 条件输入。
+5. TST 不读取指令。
+6. NST 读取 TST。
+7. 不增加 tokenizer Token。
+8. 不改变序列长度。
+9. use_topocorrect_tokens=False 与 baseline 等价。
+10. gate=0 与 baseline embedding 等价。
+11. generate 首步正确转发自定义输入。
+12. KV-cache 后续解码不重复计算状态模块。
+13. TST/NST 不进入视觉缓存。
+14. 不使用推理期 GT。
+15. 不使用状态文本 prompt。
+16. 不强制覆盖动作。
+17. 原 pending_action_list 语义不变。
+18. 新模块可以普通保存和加载。
+19. 所有指定单元测试通过。
+20. 不启动训练。
+21. 不启动 Habitat 实验。
+
+若任务书与本地源码冲突：
+
+    立即停止相应修改；
+    在 AUDIT_LOCAL_CODE.txt 或 UNRESOLVED_ISSUES.txt 中记录：
+        文件
+        函数
+        行号
+        实际 Token 顺序
+        实际 shape
+        冲突原因
+
+不得根据记忆猜接口。
+本地 checkout、实际 tokenizer 和实际 checkpoint 是最终依据。
