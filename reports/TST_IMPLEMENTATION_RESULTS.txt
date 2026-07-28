@@ -1,0 +1,47 @@
+TST implementation results (stage 3B)
+
+Implementation
+- topocorrect_navid/model/state_tokens.py:10-40 — ActionHistoryEncoder: configurable
+  four-class action embedding, one-layer GRU, learned empty state, and mask-aware
+  per-sample valid-action selection.
+- state_tokens.py:43-53 — ObservationNodePooler: learned attention scores over
+  each history group, projecting [Li,4096] to one [512] node without mean-only pooling.
+- state_tokens.py:56-76 — RelationAwareTransformerLayer: relation-bias multi-head
+  self-attention, residuals, layer norms, and feed-forward block.
+- state_tokens.py:79-188 — TopologicalStateEncoder: current 64-token attention
+  pooling, explicit temporal/log-group-length/compression features, RGB-only
+  relation features, two default Transformer layers, learned topo query, [512->4096]
+  projection, and auxiliary heads.
+- state_tokens.py:189-235 — TopoCorrectStateModule: zero gates, real TST injection,
+  detached latest auxiliary outputs, and deliberately zero-only NST path.
+- uninavid/model/uninavid_arch.py:538-557 — after final process_tensor/
+  online_process_tensor output is available, passes flattened final history memory,
+  final_token_length_lst, current [1,64,C] tokens, and per-sample action history to
+  TST; only replaces </video_special> embedding.
+- uninavid/model/language_model/llava_llama_vid.py:55-61 — defaults are state_dim=512,
+  heads=8, layers=2, actions=4, action_dim=128, dropout=0.0, and encoder enabled.
+
+Shapes and relations
+- history input: List[Tensor[Ni,4096]], groups List[List[int]] with sum(groups)=Ni.
+- current input: Tensor[B,64,4096]; action fields: optional long/bool Tensor[B,T].
+- node state: Tensor[B,N,512]; relation bias: Tensor[B,8,N,N]; topo state:
+  Tensor[B,1,512]; delta_topo: Tensor[B,1,4096].
+- auxiliary outputs: revisit_logits Tensor[B,N], novelty_logit Tensor[B,1],
+  stagnation_logit Tensor[B,1].
+- actual default TopoCorrectStateModule parameter count: 15,972,367
+  (topological encoder: 15,972,365; two scalar gates: 2).
+
+Integration behavior
+- use_topocorrect_tokens=False does not call TST.
+- use_topocorrect_tokens=True with use_topological_state_encoder=False retains the
+  zero-delta path.
+- use_topocorrect_tokens=True with encoder enabled computes real delta_topo.
+- topo_gate=0 yields inputs_embeds max absolute error 0.0 versus baseline and keeps
+  labels, attention mask, and sequence length exactly unchanged (77 / 77 in the
+  synthetic integration fixture).
+- with topo_gate=1, only the </video_special> embedding position changes (index 7
+  in the synthetic expanded sequence); [Navigation] at index 74 is unchanged.
+
+NST remains unimplemented and returns zero delta. No instruction, prompt, GT,
+pose, depth, Agent, action parser, lm_head, visual cache, or history merge code is
+read or modified by TST.

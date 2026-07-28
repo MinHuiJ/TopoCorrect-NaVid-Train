@@ -52,6 +52,13 @@ class LlavaConfig(LlamaConfig):
         self.topocorrect_image_start_token_id = getattr(self, "topocorrect_image_start_token_id", 32002)
         self.topocorrect_image_end_token_id = getattr(self, "topocorrect_image_end_token_id", 32003)
         self.topocorrect_navigation_token_id = getattr(self, "topocorrect_navigation_token_id", 32004)
+        self.topocorrect_state_dim = getattr(self, "topocorrect_state_dim", 512)
+        self.topocorrect_num_heads = getattr(self, "topocorrect_num_heads", 8)
+        self.topocorrect_num_layers = getattr(self, "topocorrect_num_layers", 2)
+        self.topocorrect_num_actions = getattr(self, "topocorrect_num_actions", 4)
+        self.topocorrect_action_dim = getattr(self, "topocorrect_action_dim", 128)
+        self.topocorrect_dropout = getattr(self, "topocorrect_dropout", 0.0)
+        self.use_topological_state_encoder = getattr(self, "use_topological_state_encoder", True)
 
 class LlavaAttLlamaModel(UniNaVIDMetaModel, LlamaModel):
     config_class = LlavaConfig

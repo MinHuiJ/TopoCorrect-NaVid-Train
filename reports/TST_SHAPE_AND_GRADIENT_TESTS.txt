@@ -1,0 +1,21 @@
+TST shape and gradient tests
+
+Command:
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover \
+    -s tests -p 'test_topocorrect_*.py' -v
+
+Result: Ran 15 tests in 0.658s — OK (0 failures, 0 errors, 0 skipped).
+Environment: PyTorch 2.0.1+cu118; Transformers 4.31.0.
+
+tests/test_topocorrect_tst.py verifies:
+- two samples with mixed recent 4-token and compressed 1-token groups;
+- delta_topo [2,1,4096], node_states [2,2,512], relation_bias [2,8,2,2];
+- revisit logits [2,2], novelty and stagnation logits [2,1];
+- action_history=None, empty [B,0], and all-False masks are finite;
+- invalid group sums and non-positive group lengths raise ValueError;
+- backward gradients exist for attention node pooler, RelationMLP, Transformer
+  attention, learned topo query, and output projection.
+
+tests/test_topocorrect_tst_integration.py verifies zero-gate exact equality and
+the single nonzero-gate </video_special> replacement location. No test loads a 7B
+checkpoint, real vision tower, Habitat, training job, or evaluation.

@@ -1,0 +1,16 @@
+TST cache-isolation test
+
+TST is invoked only in UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal
+after `cur_image_features` and `final_token_length_lst` have already been produced
+by process_tensor/online_process_tensor (uninavid/model/uninavid_arch.py:530-552).
+It consumes those final tensors as read-only inputs and writes no value to vis_embed,
+feat_cache, or long_feat_cache.
+
+tests/test_topocorrect_tst_integration.py confirms that synthetic model state gains
+no feat_cache or long_feat_cache attributes while TST executes. It also verifies
+that only </video_special> changes with nonzero topo_gate; all visual-token positions
+and [Navigation] remain unchanged.
+
+Result: PASS as part of the 15-test command recorded in
+reports/TST_SHAPE_AND_GRADIENT_TESTS.txt. No cache implementation, history merge,
+real vision tower, 7B checkpoint, Habitat, training, or evaluation was used.

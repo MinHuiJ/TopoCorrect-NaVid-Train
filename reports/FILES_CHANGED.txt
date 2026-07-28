@@ -48,10 +48,22 @@ Tests
      and multimodal zero-gate no-op behavior with action tensors [1,4].
 10. reports/TARGET_TOKENIZER_CONFIG_VALIDATION.txt
 11. reports/ACTION_HISTORY_INTERFACE_RESULTS.txt
+12. reports/TARGET_TOKENIZER_CONFIG_VALIDATION.txt
+   - Records user-verified target checkpoint tokenizer IDs 32000-32005 as six
+     single tokens, and target 4096/1408/mlp2x_gelu model configuration.
+13. topocorrect_navid/model/state_tokens.py
+   - Replaces the zero-only TST placeholder with learned observation attention
+     pooling, action GRU, relation-aware Transformer, topo query, projection, and
+     auxiliary heads; NST remains a zero delta.
+14. tests/test_topocorrect_tst.py
+15. tests/test_topocorrect_tst_integration.py
+16. reports/TST_IMPLEMENTATION_RESULTS.txt
+17. reports/TST_SHAPE_AND_GRADIENT_TESTS.txt
+18. reports/TST_CACHE_ISOLATION_TEST.txt
 
-No tokenizer vocabulary, sentinel, Agent, vision cache, or history merge logic was
-modified. Generation behavior is unchanged except explicit transparent forwarding
-of the two optional action-history fields.
+No tokenizer vocabulary, sentinel, Agent, vision cache, history merge logic, or
+NST implementation was modified. Generation behavior remains the action-history
+transparent forwarding introduced in stage 3A.
 
 Validation environment: /home/yons2/miniconda3/envs/navid/bin/python;
 PyTorch 2.0.1+cu118; Transformers 4.31.0. No 7B checkpoint, real vision tower,

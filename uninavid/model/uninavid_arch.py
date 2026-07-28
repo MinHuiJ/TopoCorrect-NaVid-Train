@@ -538,8 +538,18 @@ class UniNaVIDMetaForCausalLM(ABC):
                             video_end_and_image_start = self.get_model().embed_tokens(
                                 cur_input_ids[image_token_start + 1:image_token_start + 3])
                             if use_topocorrect:
+                                current_visual_tokens = nav_or_not[cur_image_idx][token_idx].unsqueeze(0)
+                                history_visual_tokens = [cur_image_features]
+                                history_group_lengths = [final_token_length_lst[cur_image_idx]]
+                                batch_action_history = None if action_history is None else action_history[batch_idx:batch_idx + 1]
+                                batch_action_history_mask = (
+                                    None if action_history_mask is None else action_history_mask[batch_idx:batch_idx + 1]
+                                )
                                 tst_embedding = self.get_model().topocorrect_state.build_tst_embedding(
-                                    video_end_and_image_start[:1])
+                                    video_end_and_image_start[:1], history_visual_tokens, history_group_lengths,
+                                    current_visual_tokens, batch_action_history, batch_action_history_mask,
+                                    use_encoder=getattr(self.config, 'use_topological_state_encoder', False),
+                                )
                                 cur_new_input_embeds.append(tst_embedding)
                                 cur_new_input_embeds.append(video_end_and_image_start[1:2])
                             else:
