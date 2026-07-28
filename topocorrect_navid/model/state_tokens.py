@@ -8,9 +8,10 @@ import torch.nn.functional as F
 
 
 class ActionHistoryEncoder(nn.Module):
-    def __init__(self, num_actions, action_dim, state_dim):
+    def __init__(self, num_actions, action_dim, state_dim, max_action_history):
         super().__init__()
         self.num_actions = num_actions
+        self.max_action_history = max_action_history
         self.embedding = nn.Embedding(num_actions, action_dim)
         self.gru = nn.GRU(action_dim, state_dim, batch_first=True)
         self.empty_action = nn.Parameter(torch.zeros(state_dim))
@@ -31,6 +32,8 @@ class ActionHistoryEncoder(nn.Module):
         summaries = []
         for actions, valid in zip(action_history, action_history_mask):
             actions = actions[valid]
+            if self.max_action_history is not None and actions.numel() > self.max_action_history:
+                actions = actions[-self.max_action_history:]
             if actions.numel() == 0:
                 summaries.append(self.empty_action)
                 continue
@@ -78,14 +81,15 @@ class RelationAwareTransformerLayer(nn.Module):
 
 class TopologicalStateEncoder(nn.Module):
     """Builds one global state from dynamic observation/topological nodes."""
-    def __init__(self, hidden_size, state_dim, num_heads, num_layers, num_actions, action_dim, dropout):
+    def __init__(self, hidden_size, state_dim, num_heads, num_layers, num_actions, action_dim, dropout, max_topo_nodes, max_action_history):
         super().__init__()
         self.hidden_size = hidden_size
         self.state_dim = state_dim
         self.num_heads = num_heads
+        self.max_topo_nodes = max_topo_nodes
         self.node_pooler = ObservationNodePooler(hidden_size, state_dim)
         self.current_pooler = ObservationNodePooler(hidden_size, state_dim)
-        self.action_encoder = ActionHistoryEncoder(num_actions, action_dim, state_dim)
+        self.action_encoder = ActionHistoryEncoder(num_actions, action_dim, state_dim, max_action_history)
         self.node_fusion = nn.Sequential(
             nn.Linear(state_dim * 3 + 3, state_dim), nn.GELU(), nn.LayerNorm(state_dim)
         )
@@ -130,6 +134,15 @@ class TopologicalStateEncoder(nn.Module):
         action_summary = self.action_encoder(action_history, action_history_mask, batch_size, device)
         node_lists, compression_lists = [], []
         for history, lengths in zip(history_visual_tokens, history_group_lengths):
+            if self.max_topo_nodes is not None and len(lengths) > self.max_topo_nodes:
+                # Deterministically retain the first node and most recent nodes.
+                keep_indices = [0] + list(range(len(lengths) - (self.max_topo_nodes - 1), len(lengths)))
+                offsets, start = [], 0
+                for length in lengths:
+                    offsets.append((start, start + length))
+                    start += length
+                history = torch.cat([history[left:right] for left, right in (offsets[i] for i in keep_indices)], dim=0)
+                lengths = [lengths[i] for i in keep_indices]
             nodes, compressed = [], []
             offset = 0
             total = len(lengths)
@@ -204,7 +217,7 @@ class NavigationStateEncoder(nn.Module):
         self.nav_query_mlp = nn.Sequential(nn.Linear(state_dim * 3, state_dim), nn.GELU(), nn.LayerNorm(state_dim))
         self.cross_attention = nn.MultiheadAttention(state_dim, num_heads, dropout=dropout, batch_first=True)
         self.fusion = nn.Sequential(
-            nn.Linear(state_dim * 4, state_dim), nn.GELU(), nn.LayerNorm(state_dim),
+            nn.Linear(state_dim * 5, state_dim), nn.GELU(), nn.LayerNorm(state_dim),
             nn.Linear(state_dim, state_dim), nn.GELU(), nn.LayerNorm(state_dim),
         )
         self.delta_projection = nn.Sequential(nn.Linear(state_dim, hidden_size), nn.LayerNorm(hidden_size))
@@ -232,6 +245,8 @@ class NavigationStateEncoder(nn.Module):
             raise ValueError("topo_node_states must have shape [B, N, state_dim].")
         if topo_node_mask.shape != topo_node_states.shape[:2] or topo_node_mask.dtype != torch.bool:
             raise ValueError("topo_node_mask must be bool with shape [B, N].")
+        if topo_node_mask.all(dim=1).any():
+            raise ValueError("Each sample must provide at least one unmasked topology node.")
         if action_summary.shape != (batch_size, self.state_dim):
             raise ValueError("action_summary must have shape [B, state_dim].")
 
@@ -274,12 +289,15 @@ class NavigationStateEncoder(nn.Module):
             valid_rows = valid.any(dim=1)
             if valid_rows.any():
                 pointer_probs[valid_rows] = torch.softmax(pointer_logits[valid_rows], dim=-1)
-            positions = torch.linspace(0.0, 1.0, steps=instruction_length, device=nav_query.device, dtype=nav_query.dtype)
+            ranks = valid.to(nav_query.dtype).cumsum(dim=-1) - 1
+            valid_counts = valid.sum(dim=-1, keepdim=True).to(nav_query.dtype)
+            positions = torch.where(valid, ranks / (valid_counts - 1).clamp_min(1), torch.zeros_like(ranks))
             progress = (pointer_probs * positions).sum(dim=-1, keepdim=True)
             progress = torch.where(valid_rows[:, None], progress,
                                    torch.sigmoid(self.unknown_progress).expand(batch_size, 1))
+        pointer_context = torch.bmm(pointer_probs.unsqueeze(1), instruction_states).squeeze(1) if instruction_length else current_summary.new_zeros(batch_size, self.state_dim)
         nav_state = self.fusion(torch.cat([
-            instruction_context.squeeze(1), current_summary, topo_state.squeeze(1), action_summary
+            instruction_context.squeeze(1), pointer_context, current_summary, topo_state.squeeze(1), action_summary
         ], dim=-1)).unsqueeze(1)
         delta_nav = self.delta_projection(nav_state)
         recovery_target_logits = torch.bmm(
@@ -298,7 +316,8 @@ class NavigationStateEncoder(nn.Module):
             "recovery_mode_logits": self.recovery_mode_head(nav_state.squeeze(1)),
             "recovery_target_logits": recovery_target_logits,
             "nav_state": nav_state,
-            "instruction_attention": pointer_probs,
+            "instruction_cross_attention": instruction_attention.squeeze(1) if instruction_length else pointer_probs,
+            "instruction_pointer_probs": pointer_probs,
         }
 
 
@@ -313,6 +332,7 @@ class TopoCorrectStateModule(nn.Module):
             hidden_size, state_dim, getattr(config, "topocorrect_num_heads", 8),
             getattr(config, "topocorrect_num_layers", 2), getattr(config, "topocorrect_num_actions", 4),
             getattr(config, "topocorrect_action_dim", 128), getattr(config, "topocorrect_dropout", 0.0),
+            getattr(config, "topocorrect_max_topo_nodes", 64), getattr(config, "topocorrect_max_action_history", 32),
         )
         self.navigation_state_encoder = NavigationStateEncoder(
             hidden_size, state_dim, getattr(config, "topocorrect_nav_num_heads", 8),
@@ -320,6 +340,10 @@ class TopoCorrectStateModule(nn.Module):
             getattr(config, "topocorrect_num_failure_types", 8),
             getattr(config, "topocorrect_num_recovery_modes", 4),
         )
+        self.last_topo_outputs = None
+        self.last_nav_outputs = None
+
+    def clear_debug_outputs(self):
         self.last_topo_outputs = None
         self.last_nav_outputs = None
 
@@ -364,6 +388,32 @@ class TopoCorrectStateModule(nn.Module):
         embedding = embedding.squeeze(1) if len(original_shape) == 2 else embedding
         self.last_nav_outputs = {name: value.detach() for name, value in outputs.items()}
         return embedding, outputs
+
+    @staticmethod
+    def compute_topocorrect_aux_losses(outputs, labels, ignore_index=-100):
+        """Optional supervised losses; labels are never consumed by inference paths."""
+        if not labels:
+            return None, {}
+        losses = {}
+        def bce(name, output_name):
+            target = labels.get(name)
+            if target is not None:
+                losses[name] = F.binary_cross_entropy_with_logits(outputs[output_name], target.to(outputs[output_name]))
+        def ce(name, output_name):
+            target = labels.get(name)
+            if target is not None:
+                losses[name] = F.cross_entropy(outputs[output_name], target.to(outputs[output_name].device), ignore_index=ignore_index)
+        if labels.get("pointer_labels") is not None:
+            losses["pointer"] = F.cross_entropy(outputs["instruction_pointer_logits"], labels["pointer_labels"].to(outputs["instruction_pointer_logits"].device), ignore_index=ignore_index)
+        if labels.get("progress_target") is not None:
+            losses["progress"] = F.mse_loss(outputs["progress"], labels["progress_target"].to(outputs["progress"]))
+        bce("correction_target", "correction_logit")
+        bce("landmark_labels", "landmark_logits")
+        ce("failure_target", "failure_logits")
+        ce("recovery_mode_target", "recovery_mode_logits")
+        ce("recovery_target_index", "recovery_target_logits")
+        total = sum(losses.values()) if losses else None
+        return total, losses
 
     @staticmethod
     def validate_instruction_inputs(instruction_ids, instruction_attention_mask, batch_size):

@@ -85,6 +85,12 @@ Tests
 30. reports/NST_PROGRESS_AND_LANDMARK_TESTS.txt
 31. reports/NST_RECOVERY_TARGET_TESTS.txt
 32. reports/NST_CACHE_ISOLATION_TEST.txt
+33. tests/test_topocorrect_readiness.py
+34. reports/TRAINING_INFERENCE_READINESS_FIXES.txt
+35. reports/AUXILIARY_LOSS_AND_GRADIENT_TESTS.txt
+36. reports/PROGRESS_PADDING_INVARIANCE_TEST.txt
+37. reports/DEVICE_DTYPE_COMPATIBILITY_TEST.txt
+38. reports/STRUCTURED_STATE_OUTPUT_TEST.txt
 
 No tokenizer vocabulary, sentinel, Agent, vision cache, history merge logic, or
 No Agent, vision cache, history merge, lm_head, or action execution logic was

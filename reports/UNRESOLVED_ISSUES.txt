@@ -17,3 +17,5 @@ Unresolved issues after the zero-gated no-op integration
    low resolution and final_token_length_lst remains only existing metadata. No
    visual cache or merge format was changed; no Habitat, training, or evaluation
    was run.
+5. CUDA/fp16/bf16 metadata-transfer validation remains unexecuted locally; CPU
+   synthetic coverage verifies device-transfer logic without loading a real model.

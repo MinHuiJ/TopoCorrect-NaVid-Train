@@ -1,0 +1,8 @@
+Progress padding invariance test
+
+For masks [True,True,False,False] and [True,True,True,True], NST uses each row's
+own valid-token count. The first row positions are [0,1], so progress equals its
+second pointer probability rather than using padded-L=4 position 1/3.
+
+tests/test_topocorrect_readiness.py asserts this relationship. Empty/all-False
+masks use unknown-progress fallback and remain finite.

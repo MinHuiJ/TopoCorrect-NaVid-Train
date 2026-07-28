@@ -1,0 +1,11 @@
+Auxiliary loss and gradient tests
+
+TopoCorrectStateModule.compute_topocorrect_aux_losses accepts optional landmark,
+pointer, progress, failure, correction, recovery-mode, and recovery-target labels.
+No labels returns (None, {}), leaving LM behavior unchanged. Labels are loss targets
+only and never enter inference encoders.
+
+The readiness test verifies finite nonzero gradients for pointer key, failure,
+correction, recovery mode, and recovery-target projections. NST tests cover
+instruction projector, landmark head, nav query, cross attention, fusion, and delta
+projection gradients.

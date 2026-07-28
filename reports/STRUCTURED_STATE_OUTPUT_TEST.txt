@@ -1,0 +1,8 @@
+Structured state output
+
+TST returns current-batch node_states, topo_state, padding_mask, action_summary,
+and current_visual_summary. NST returns distinct instruction_cross_attention and
+instruction_pointer_probs fields plus landmark/pointer/progress/recovery outputs.
+Detached last_* fields are diagnostic only and are cleared at each preparation call.
+
+No state is an Agent interface and no gradient-bearing cross-episode state is kept.

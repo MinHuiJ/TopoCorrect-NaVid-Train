@@ -1,0 +1,14 @@
+Training/inference readiness fixes (stage 4C)
+
+Confirmed and fixed:
+- LlavaConfig effective dropout default is now 0.0 and real LlavaConfig() is tested.
+- Pointer-weighted instruction context is fused into NST, so pointer distributions affect delta_nav.
+- Progress uses per-sample valid-token ranks/counts; a 2-token instruction padded to 4 uses [0,1].
+- All topology-node mask raises ValueError; no all-negative-infinity softmax is produced.
+- Action history retains most recent topocorrect_max_action_history; TST retains first
+  node plus most recent max_topo_nodes-1 nodes before relation attention.
+- Metadata is moved to state/embedding devices with long/bool dtypes preserved.
+- Debug fields are cleared at preparation start; local encoder returns provide current batch state.
+
+No Agent, recovery execution, action override, lm_head, cache merge, 7B loading,
+training, or Habitat run was performed.

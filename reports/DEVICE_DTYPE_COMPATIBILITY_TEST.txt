@@ -1,0 +1,8 @@
+Device and dtype compatibility
+
+Multimodal preparation moves action history/mask to current visual-token device and
+instruction IDs/masks to input-embedding device, retaining torch.long/torch.bool.
+This supports CUDA models receiving CPU metadata without duplicating visual tensors.
+
+CPU synthetic tests pass. CUDA/fp16/bf16 execution was not run; no 7B, real vision
+tower, Habitat, training, or evaluation was loaded.

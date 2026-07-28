@@ -45,7 +45,7 @@ class LlavaConfig(LlamaConfig):
         self.topocorrect_topo_layers = getattr(self, "topocorrect_topo_layers", 2)
         self.topocorrect_topo_heads = getattr(self, "topocorrect_topo_heads", 8)
         self.topocorrect_nav_heads = getattr(self, "topocorrect_nav_heads", 8)
-        self.topocorrect_dropout = getattr(self, "topocorrect_dropout", 0.1)
+        self.topocorrect_dropout = getattr(self, "topocorrect_dropout", 0.0)
         self.topocorrect_topo_gate_init = getattr(self, "topocorrect_topo_gate_init", 0.0)
         self.topocorrect_nav_gate_init = getattr(self, "topocorrect_nav_gate_init", 0.0)
         self.topocorrect_video_end_token_id = getattr(self, "topocorrect_video_end_token_id", 32001)
@@ -64,6 +64,7 @@ class LlavaConfig(LlamaConfig):
         self.topocorrect_nav_dropout = getattr(self, "topocorrect_nav_dropout", 0.0)
         self.topocorrect_num_failure_types = getattr(self, "topocorrect_num_failure_types", 8)
         self.topocorrect_num_recovery_modes = getattr(self, "topocorrect_num_recovery_modes", 4)
+        self.topocorrect_aux_loss_weight = getattr(self, "topocorrect_aux_loss_weight", 1.0)
 
 class LlavaAttLlamaModel(UniNaVIDMetaModel, LlamaModel):
     config_class = LlavaConfig

@@ -384,6 +384,7 @@ class UniNaVIDMetaForCausalLM(ABC):
                                              prompts=None, use_topocorrect_tokens=None,
                                              action_history=None, action_history_mask=None,
                                              instruction_ids=None, instruction_attention_mask=None):
+        self.get_model().topocorrect_state.clear_debug_outputs()
         self.get_model().topocorrect_state.validate_instruction_inputs(
             instruction_ids, instruction_attention_mask, input_ids.shape[0]
         )
@@ -551,6 +552,9 @@ class UniNaVIDMetaForCausalLM(ABC):
                                 batch_action_history_mask = (
                                     None if action_history_mask is None else action_history_mask[batch_idx:batch_idx + 1]
                                 )
+                                if batch_action_history is not None:
+                                    batch_action_history = batch_action_history.to(current_visual_tokens.device)
+                                    batch_action_history_mask = batch_action_history_mask.to(current_visual_tokens.device)
                                 tst_embedding, topo_outputs = self.get_model().topocorrect_state.build_tst_embedding(
                                     video_end_and_image_start[:1], history_visual_tokens, history_group_lengths,
                                     current_visual_tokens, batch_action_history, batch_action_history_mask,
@@ -626,8 +630,9 @@ class UniNaVIDMetaForCausalLM(ABC):
                                 batch_instruction_mask = torch.empty(
                                     (1, 0), dtype=torch.bool, device=tail_embeddings.device)
                             else:
-                                batch_instruction_ids = instruction_ids[batch_idx:batch_idx + 1]
-                                batch_instruction_mask = instruction_attention_mask[batch_idx:batch_idx + 1]
+                                embedding_device = self.get_model().embed_tokens.weight.device
+                                batch_instruction_ids = instruction_ids[batch_idx:batch_idx + 1].to(embedding_device)
+                                batch_instruction_mask = instruction_attention_mask[batch_idx:batch_idx + 1].to(embedding_device)
                             batch_instruction_embeddings = self.get_model().embed_tokens(batch_instruction_ids)
                             nst_embedding, _ = self.get_model().topocorrect_state.build_nst_embedding_with_encoder(
                                 tail_embeddings[1:2], batch_instruction_ids, batch_instruction_mask,
