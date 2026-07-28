@@ -9,10 +9,10 @@ Unresolved issues after the zero-gated no-op integration
    /home/yons2/miniconda3/envs/navid/bin/python (PyTorch 2.0.1+cu118 and
    Transformers 4.31.0): 19 tests pass, with no failures, errors, or skips. It does
    not load a real vision tower or a 7B checkpoint.
-3. Real TST is implemented, but NST remains intentionally zero-only. There is no
-   instruction encoder, navigation-state model, action/Agent change, or cache
-   change. Raw instruction tokens are now validated and transparently forwarded
-   only; the TST ignores them and no prompt-string parsing exists.
+3. Real NST is now implemented internally, but it remains prediction-only: no
+   Agent change, action override, backtrack execution, recovery execution, or
+   training loss is implemented. TST remains instruction-independent and no
+   prompt-string parsing or cache change exists.
 4. Existing history semantics are retained: history contains the current frame at
    low resolution and final_token_length_lst remains only existing metadata. No
    visual cache or merge format was changed; no Habitat, training, or evaluation

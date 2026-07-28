@@ -1,0 +1,17 @@
+NST progress and landmark tests
+
+Command:
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover \
+    -s tests -p 'test_topocorrect_*.py' -v
+Result: Ran 23 tests in 1.303s — OK (0 failures, 0 errors, 0 skipped).
+
+tests/test_topocorrect_nst.py verifies delta_nav [2,1,4096], landmark logits and
+pointer logits [2,3], progress [2,1] within [0,1], failure [2,8], recovery mode
+[2,4], recovery target [2,2], empty instructions, all-False masks, one node, and
+finite values. Gradient paths cover instruction projector, landmark head, nav query,
+cross attention, fusion, delta projection, and recovery target projection.
+
+Instruction-interface tests continue to prove TST output is exactly independent of
+different instruction IDs. NST unit tests prove changed instruction embeddings and
+changed topo state change delta_nav. No GT progress, prompt parsing, or instruction
+truncation is used.

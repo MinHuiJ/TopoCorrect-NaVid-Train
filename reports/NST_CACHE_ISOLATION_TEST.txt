@@ -1,0 +1,12 @@
+NST cache-isolation test
+
+NST is invoked from prepare_inputs_labels_for_multimodal only after existing final
+history memory is formed (uninavid/model/uninavid_arch.py:544-639). It reads current
+tokens and local TST outputs, then replaces only [Navigation] embedding. It does not
+write vis_embed, feat_cache, or long_feat_cache.
+
+tests/test_topocorrect_nst_integration.py confirms no synthetic feat_cache or
+long_feat_cache attributes appear while NST executes, zero-gate exact baseline
+equality, and nonzero nav gate changes only navigation index 74. It is included in
+the passing 23-test command; no real vision tower, checkpoint, Habitat, training, or
+evaluation was used.

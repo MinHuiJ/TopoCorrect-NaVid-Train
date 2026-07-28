@@ -33,7 +33,7 @@ class TopoCorrectNavigationIntegrationTest(unittest.TestCase):
         class _Backbone(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.embed_tokens = nn.Embedding(128, 8)
+                self.embed_tokens = nn.Embedding(256, 8)
                 self.topocorrect_state = TopoCorrectStateModule(types.SimpleNamespace(
                     hidden_size=8, topocorrect_state_dim=8, topocorrect_num_heads=2,
                     topocorrect_num_layers=2, topocorrect_num_actions=4,

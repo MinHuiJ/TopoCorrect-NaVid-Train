@@ -59,6 +59,11 @@ class LlavaConfig(LlamaConfig):
         self.topocorrect_action_dim = getattr(self, "topocorrect_action_dim", 128)
         self.topocorrect_dropout = getattr(self, "topocorrect_dropout", 0.0)
         self.use_topological_state_encoder = getattr(self, "use_topological_state_encoder", True)
+        self.use_navigation_state_encoder = getattr(self, "use_navigation_state_encoder", True)
+        self.topocorrect_nav_num_heads = getattr(self, "topocorrect_nav_num_heads", 8)
+        self.topocorrect_nav_dropout = getattr(self, "topocorrect_nav_dropout", 0.0)
+        self.topocorrect_num_failure_types = getattr(self, "topocorrect_num_failure_types", 8)
+        self.topocorrect_num_recovery_modes = getattr(self, "topocorrect_num_recovery_modes", 4)
 
 class LlavaAttLlamaModel(UniNaVIDMetaModel, LlamaModel):
     config_class = LlavaConfig

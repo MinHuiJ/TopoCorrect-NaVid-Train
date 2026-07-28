@@ -456,6 +456,8 @@ class UniNaVIDMetaForCausalLM(ABC):
 
             if not long_video:
                 token_idx = 0  
+                topo_outputs = None
+                current_visual_tokens = None
                 use_topocorrect = (
                     getattr(self.config, 'use_topocorrect_tokens', False)
                     if use_topocorrect_tokens is None else use_topocorrect_tokens
@@ -549,10 +551,11 @@ class UniNaVIDMetaForCausalLM(ABC):
                                 batch_action_history_mask = (
                                     None if action_history_mask is None else action_history_mask[batch_idx:batch_idx + 1]
                                 )
-                                tst_embedding = self.get_model().topocorrect_state.build_tst_embedding(
+                                tst_embedding, topo_outputs = self.get_model().topocorrect_state.build_tst_embedding(
                                     video_end_and_image_start[:1], history_visual_tokens, history_group_lengths,
                                     current_visual_tokens, batch_action_history, batch_action_history_mask,
                                     use_encoder=getattr(self.config, 'use_topological_state_encoder', False),
+                                    return_outputs=True,
                                 )
                                 cur_new_input_embeds.append(tst_embedding)
                                 cur_new_input_embeds.append(video_end_and_image_start[1:2])
@@ -617,8 +620,21 @@ class UniNaVIDMetaForCausalLM(ABC):
                                     'TopoCorrect expected [Navigation] immediately after </image_special>.'
                                 )
                             tail_embeddings = self.get_model().embed_tokens(cur_input_ids)
-                            nst_embedding = self.get_model().topocorrect_state.build_nst_embedding(
-                                tail_embeddings[1:2])
+                            if instruction_ids is None:
+                                batch_instruction_ids = torch.empty(
+                                    (1, 0), dtype=torch.long, device=tail_embeddings.device)
+                                batch_instruction_mask = torch.empty(
+                                    (1, 0), dtype=torch.bool, device=tail_embeddings.device)
+                            else:
+                                batch_instruction_ids = instruction_ids[batch_idx:batch_idx + 1]
+                                batch_instruction_mask = instruction_attention_mask[batch_idx:batch_idx + 1]
+                            batch_instruction_embeddings = self.get_model().embed_tokens(batch_instruction_ids)
+                            nst_embedding, _ = self.get_model().topocorrect_state.build_nst_embedding_with_encoder(
+                                tail_embeddings[1:2], batch_instruction_ids, batch_instruction_mask,
+                                batch_instruction_embeddings, current_visual_tokens, topo_outputs,
+                                use_encoder=(getattr(self.config, 'use_navigation_state_encoder', False)
+                                             and topo_outputs is not None),
+                            )
                             tail_embeddings = torch.cat(
                                 [tail_embeddings[:1], nst_embedding, tail_embeddings[2:]], dim=0)
                             cur_new_input_embeds.append(tail_embeddings)

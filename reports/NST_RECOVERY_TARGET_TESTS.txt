@@ -1,0 +1,10 @@
+NST recovery-target tests
+
+NavigationStateEncoder computes recovery_target_logits by projected nav-state to
+projected TST-node similarity (topocorrect_navid/model/state_tokens.py:285-288).
+Shape is [B,N]; TST padding nodes are masked to negative infinity. Recovery mode
+head shape is [B,4] with fixed indices CONTINUE, BACKTRACK, REORIENT, STOP_RECHECK.
+
+The 23-test command records [2,2] target logits for two nodes and [1,1] for a
+single-node TST. The recovery projection receives gradients. This is prediction-only:
+no backtrack, action override, Agent change, or actual recovery execution exists.

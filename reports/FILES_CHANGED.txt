@@ -71,10 +71,25 @@ Tests
      inspects token values or prompt text.
 22. tests/test_topocorrect_instruction_interface.py
 23. reports/INSTRUCTION_INTERFACE_RESULTS.txt
+24. topocorrect_navid/model/state_tokens.py
+   - Adds NavigationStateEncoder: landmark-biased instruction cross-attention,
+     soft pointer/progress, navigation fusion, recovery-target prediction, and
+     auxiliary heads; TST only exposes existing structured summaries.
+25. uninavid/model/uninavid_arch.py
+   - Injects real NST only at the existing [Navigation] embedding position.
+26. uninavid/model/language_model/llava_llama_vid.py
+   - Adds navigation-state encoder configuration defaults.
+27. tests/test_topocorrect_nst.py
+28. tests/test_topocorrect_nst_integration.py
+29. reports/NST_IMPLEMENTATION_RESULTS.txt
+30. reports/NST_PROGRESS_AND_LANDMARK_TESTS.txt
+31. reports/NST_RECOVERY_TARGET_TESTS.txt
+32. reports/NST_CACHE_ISOLATION_TEST.txt
 
 No tokenizer vocabulary, sentinel, Agent, vision cache, history merge logic, or
-NST implementation was modified. Generation behavior now transparently forwards
-only the stage-3A action fields and stage-4A instruction fields.
+No Agent, vision cache, history merge, lm_head, or action execution logic was
+modified; NST is limited to this internal embedding replacement. Generation behavior continues to
+transparently forward only stage-3A action and stage-4A instruction fields.
 
 Validation environment: /home/yons2/miniconda3/envs/navid/bin/python;
 PyTorch 2.0.1+cu118; Transformers 4.31.0. No 7B checkpoint, real vision tower,

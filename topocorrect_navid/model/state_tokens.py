@@ -185,8 +185,121 @@ class TopologicalStateEncoder(nn.Module):
             "novelty_logit": self.novelty_head(topo_state.squeeze(1)),
             "stagnation_logit": self.stagnation_head(topo_state.squeeze(1)),
             "padding_mask": padding_mask,
+            "action_summary": action_summary,
+            "current_visual_summary": current_summary,
         }
         return delta_topo, outputs
+
+
+class NavigationStateEncoder(nn.Module):
+    """Landmark-aware instruction grounding conditioned on the TST state."""
+    def __init__(self, hidden_size, state_dim, num_heads, dropout, num_failure_types, num_recovery_modes):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.state_dim = state_dim
+        self.instruction_norm = nn.LayerNorm(hidden_size)
+        self.instruction_projector = nn.Linear(hidden_size, state_dim)
+        self.landmark_head = nn.Sequential(nn.Linear(state_dim, state_dim // 2), nn.GELU(), nn.Linear(state_dim // 2, 1))
+        self.current_pooler = ObservationNodePooler(hidden_size, state_dim)
+        self.nav_query_mlp = nn.Sequential(nn.Linear(state_dim * 3, state_dim), nn.GELU(), nn.LayerNorm(state_dim))
+        self.cross_attention = nn.MultiheadAttention(state_dim, num_heads, dropout=dropout, batch_first=True)
+        self.fusion = nn.Sequential(
+            nn.Linear(state_dim * 4, state_dim), nn.GELU(), nn.LayerNorm(state_dim),
+            nn.Linear(state_dim, state_dim), nn.GELU(), nn.LayerNorm(state_dim),
+        )
+        self.delta_projection = nn.Sequential(nn.Linear(state_dim, hidden_size), nn.LayerNorm(hidden_size))
+        self.pointer_key = nn.Linear(state_dim, state_dim, bias=False)
+        self.progress_confidence_head = nn.Linear(state_dim, 1)
+        self.unknown_progress = nn.Parameter(torch.zeros(()))
+        self.stop_readiness_head = nn.Linear(state_dim, 1)
+        self.failure_head = nn.Linear(state_dim, num_failure_types)
+        self.correction_head = nn.Linear(state_dim, 1)
+        self.recovery_mode_head = nn.Linear(state_dim, num_recovery_modes)
+        self.recovery_query = nn.Linear(state_dim, state_dim, bias=False)
+        self.recovery_key = nn.Linear(state_dim, state_dim, bias=False)
+
+    def _validate(self, instruction_ids, instruction_attention_mask, instruction_embeddings,
+                  current_visual_tokens, topo_state, topo_node_states, topo_node_mask, action_summary):
+        batch_size = current_visual_tokens.shape[0]
+        TopoCorrectStateModule.validate_instruction_inputs(instruction_ids, instruction_attention_mask, batch_size)
+        if current_visual_tokens.ndim != 3 or current_visual_tokens.shape[1:] != (64, self.hidden_size):
+            raise ValueError("current_visual_tokens must have shape [B, 64, hidden_size].")
+        if instruction_embeddings.ndim != 3 or instruction_embeddings.shape[:2] != instruction_ids.shape or instruction_embeddings.shape[2] != self.hidden_size:
+            raise ValueError("instruction_embeddings must have shape [B, L, hidden_size].")
+        if topo_state.shape != (batch_size, 1, self.state_dim):
+            raise ValueError("topo_state must have shape [B, 1, state_dim].")
+        if topo_node_states.ndim != 3 or topo_node_states.shape[0] != batch_size or topo_node_states.shape[2] != self.state_dim:
+            raise ValueError("topo_node_states must have shape [B, N, state_dim].")
+        if topo_node_mask.shape != topo_node_states.shape[:2] or topo_node_mask.dtype != torch.bool:
+            raise ValueError("topo_node_mask must be bool with shape [B, N].")
+        if action_summary.shape != (batch_size, self.state_dim):
+            raise ValueError("action_summary must have shape [B, state_dim].")
+
+    def forward(self, instruction_ids, instruction_attention_mask, instruction_embeddings,
+                current_visual_tokens, topo_state, topo_node_states, topo_node_mask, action_summary):
+        self._validate(instruction_ids, instruction_attention_mask, instruction_embeddings,
+                       current_visual_tokens, topo_state, topo_node_states, topo_node_mask, action_summary)
+        batch_size, instruction_length = instruction_ids.shape
+        current_summary = torch.stack([self.current_pooler(tokens) for tokens in current_visual_tokens], dim=0)
+        nav_query = self.nav_query_mlp(torch.cat([current_summary, topo_state.squeeze(1), action_summary], dim=-1)).unsqueeze(1)
+        if instruction_length == 0:
+            instruction_context = nav_query.new_zeros(batch_size, 1, self.state_dim)
+            landmark_logits = nav_query.new_zeros(batch_size, 0)
+            pointer_logits = nav_query.new_zeros(batch_size, 0)
+            pointer_probs = nav_query.new_zeros(batch_size, 0)
+            progress = torch.sigmoid(self.unknown_progress).expand(batch_size, 1)
+        else:
+            instruction_states = self.instruction_projector(self.instruction_norm(instruction_embeddings))
+            landmark_logits = self.landmark_head(instruction_states).squeeze(-1)
+            valid = instruction_attention_mask
+            safe_states = instruction_states.clone()
+            safe_mask = ~valid.clone()
+            empty_rows = ~valid.any(dim=1)
+            if empty_rows.any():
+                safe_mask[empty_rows, 0] = False
+                safe_states[empty_rows, 0] = 0
+            landmark_bias = torch.log(torch.sigmoid(landmark_logits).clamp_min(1e-6))
+            attn_mask = landmark_bias[:, None, :].expand(-1, self.cross_attention.num_heads, -1)
+            attn_mask = attn_mask.reshape(batch_size * self.cross_attention.num_heads, 1, instruction_length)
+            instruction_context, instruction_attention = self.cross_attention(
+                nav_query, safe_states, safe_states, key_padding_mask=safe_mask,
+                attn_mask=attn_mask, need_weights=True, average_attn_weights=True,
+            )
+            instruction_context = torch.where(valid.any(dim=1)[:, None, None], instruction_context,
+                                              torch.zeros_like(instruction_context))
+            pointer_logits = torch.bmm(nav_query, self.pointer_key(instruction_states).transpose(1, 2)).squeeze(1)
+            pointer_logits = pointer_logits + landmark_logits
+            pointer_logits = pointer_logits.masked_fill(~valid, float("-inf"))
+            pointer_probs = torch.zeros_like(pointer_logits)
+            valid_rows = valid.any(dim=1)
+            if valid_rows.any():
+                pointer_probs[valid_rows] = torch.softmax(pointer_logits[valid_rows], dim=-1)
+            positions = torch.linspace(0.0, 1.0, steps=instruction_length, device=nav_query.device, dtype=nav_query.dtype)
+            progress = (pointer_probs * positions).sum(dim=-1, keepdim=True)
+            progress = torch.where(valid_rows[:, None], progress,
+                                   torch.sigmoid(self.unknown_progress).expand(batch_size, 1))
+        nav_state = self.fusion(torch.cat([
+            instruction_context.squeeze(1), current_summary, topo_state.squeeze(1), action_summary
+        ], dim=-1)).unsqueeze(1)
+        delta_nav = self.delta_projection(nav_state)
+        recovery_target_logits = torch.bmm(
+            self.recovery_query(nav_state), self.recovery_key(topo_node_states).transpose(1, 2)
+        ).squeeze(1) / math.sqrt(self.state_dim)
+        recovery_target_logits = recovery_target_logits.masked_fill(topo_node_mask, float("-inf"))
+        return delta_nav, {
+            "landmark_logits": landmark_logits,
+            "instruction_pointer_logits": pointer_logits,
+            "instruction_pointer_probs": pointer_probs,
+            "progress": progress.clamp(0.0, 1.0),
+            "progress_confidence": torch.sigmoid(self.progress_confidence_head(nav_state.squeeze(1))),
+            "stop_readiness_logit": self.stop_readiness_head(nav_state.squeeze(1)),
+            "failure_logits": self.failure_head(nav_state.squeeze(1)),
+            "correction_logit": self.correction_head(nav_state.squeeze(1)),
+            "recovery_mode_logits": self.recovery_mode_head(nav_state.squeeze(1)),
+            "recovery_target_logits": recovery_target_logits,
+            "nav_state": nav_state,
+            "instruction_attention": pointer_probs,
+        }
 
 
 class TopoCorrectStateModule(nn.Module):
@@ -201,7 +314,14 @@ class TopoCorrectStateModule(nn.Module):
             getattr(config, "topocorrect_num_layers", 2), getattr(config, "topocorrect_num_actions", 4),
             getattr(config, "topocorrect_action_dim", 128), getattr(config, "topocorrect_dropout", 0.0),
         )
+        self.navigation_state_encoder = NavigationStateEncoder(
+            hidden_size, state_dim, getattr(config, "topocorrect_nav_num_heads", 8),
+            getattr(config, "topocorrect_nav_dropout", 0.0),
+            getattr(config, "topocorrect_num_failure_types", 8),
+            getattr(config, "topocorrect_num_recovery_modes", 4),
+        )
         self.last_topo_outputs = None
+        self.last_nav_outputs = None
 
     def build_zero_topo_delta(self, base_video_end_embedding):
         return torch.zeros_like(base_video_end_embedding)
@@ -211,9 +331,10 @@ class TopoCorrectStateModule(nn.Module):
 
     def build_tst_embedding(self, base_video_end_embedding, history_visual_tokens=None,
                             history_group_lengths=None, current_visual_tokens=None,
-                            action_history=None, action_history_mask=None, use_encoder=False):
+                            action_history=None, action_history_mask=None, use_encoder=False, return_outputs=False):
         if not use_encoder:
-            return base_video_end_embedding - torch.tanh(self.topo_gate) * self.build_zero_topo_delta(base_video_end_embedding)
+            result = base_video_end_embedding - torch.tanh(self.topo_gate) * self.build_zero_topo_delta(base_video_end_embedding)
+            return (result, None) if return_outputs else result
         original_shape = base_video_end_embedding.shape
         base = base_video_end_embedding.unsqueeze(1) if base_video_end_embedding.ndim == 2 else base_video_end_embedding
         delta_topo, outputs = self.topological_state_encoder(
@@ -221,10 +342,28 @@ class TopoCorrectStateModule(nn.Module):
         )
         self.last_topo_outputs = {name: value.detach() for name, value in outputs.items()}
         embedding = base + torch.tanh(self.topo_gate) * delta_topo
-        return embedding.squeeze(1) if len(original_shape) == 2 else embedding
+        embedding = embedding.squeeze(1) if len(original_shape) == 2 else embedding
+        return (embedding, outputs) if return_outputs else embedding
 
     def build_nst_embedding(self, base_navigation_embedding):
         return base_navigation_embedding - torch.tanh(self.nav_gate) * self.build_zero_nav_delta(base_navigation_embedding)
+
+    def build_nst_embedding_with_encoder(self, base_navigation_embedding, instruction_ids,
+                                         instruction_attention_mask, instruction_embeddings,
+                                         current_visual_tokens, topo_outputs, use_encoder=False):
+        if not use_encoder:
+            return self.build_nst_embedding(base_navigation_embedding), None
+        delta_nav, outputs = self.navigation_state_encoder(
+            instruction_ids, instruction_attention_mask, instruction_embeddings,
+            current_visual_tokens, topo_outputs["topo_state"], topo_outputs["node_states"],
+            topo_outputs["padding_mask"], topo_outputs["action_summary"],
+        )
+        original_shape = base_navigation_embedding.shape
+        base = base_navigation_embedding.unsqueeze(1) if base_navigation_embedding.ndim == 2 else base_navigation_embedding
+        embedding = base + torch.tanh(self.nav_gate) * delta_nav
+        embedding = embedding.squeeze(1) if len(original_shape) == 2 else embedding
+        self.last_nav_outputs = {name: value.detach() for name, value in outputs.items()}
+        return embedding, outputs
 
     @staticmethod
     def validate_instruction_inputs(instruction_ids, instruction_attention_mask, batch_size):

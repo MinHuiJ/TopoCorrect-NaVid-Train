@@ -1,0 +1,40 @@
+Landmark-aware NST implementation results (stage 4B)
+
+Implementation
+- NavigationStateEncoder, topocorrect_navid/model/state_tokens.py:194-302.
+  It projects explicit raw instruction embeddings [B,L,4096] to [B,L,512], applies
+  LandmarkTokenHead, landmark-biased 8-head cross-attention, soft pointer/progress,
+  fusion, delta projection, and navigation auxiliary heads.
+- TopologicalStateEncoder output dictionary now exposes existing action_summary and
+  current_visual_summary without changing TST calculations: state_tokens.py:180-191.
+- TopoCorrectStateModule owns NavigationStateEncoder and injects
+  base_navigation + tanh(nav_gate)*delta_nav at state_tokens.py:305-366.
+- Multimodal integration reads final history memory only after its existing merge,
+  passes local TST outputs to NST, and replaces only [Navigation]:
+  uninavid/model/uninavid_arch.py:544-639.
+- Config defaults: use_navigation_state_encoder=True, nav heads=8, nav dropout=0,
+  eight failure classes and four recovery modes:
+  uninavid/model/language_model/llava_llama_vid.py:52-66.
+
+Shapes
+- instruction ids/mask: long/bool [B,L]; current tokens [B,64,4096].
+- topo state [B,1,512], node states [B,N,512], node padding mask [B,N], action
+  summary [B,512].
+- delta_nav [B,1,4096]; landmark and pointer logits [B,L]; progress and confidence
+  [B,1]; failure [B,8]; recovery mode [B,4]; recovery target [B,N].
+- progress is clamped to [0,1]; empty/all-False instruction inputs have safe
+  fallback outputs with no NaN/Inf.
+
+Parameters
+- Full TopoCorrectStateModule: 26,627,105 parameters.
+- NavigationStateEncoder: 10,654,226 parameters.
+
+Behavior
+- nav_gate=0: expanded inputs_embeds maximum error 0.0 versus baseline, sequence
+  length 77/77, labels and attention mask unchanged.
+- nav_gate=1: only [Navigation] position 74 changes in the synthetic integration
+  sequence; </video_special> position 7 remains controlled exclusively by TST.
+- NST reads TST outputs but does not write back to TST or visual caches. NST now
+  uses explicit instruction embeddings only, never prompt-string parsing.
+- No Agent action override, recovery execution, lm_head change, training, Habitat,
+  real vision tower, or 7B checkpoint loading was performed.
