@@ -1,0 +1,43 @@
+Action-history interface results (stage 3A)
+
+Modified functions
+- LlavaLlamaAttForCausalLM.forward:
+  uninavid/model/language_model/llava_llama_vid.py:78-108.
+  New optional parameters are action_history: Optional[torch.LongTensor] and
+  action_history_mask: Optional[torch.BoolTensor]. They are forwarded unchanged
+  to prepare_inputs_labels_for_multimodal.
+- LlavaLlamaAttForCausalLM.prepare_inputs_for_generation:
+  uninavid/model/language_model/llava_llama_vid.py:146-172.
+  It reads both kwargs and includes each in model_inputs only when non-None. This
+  runs after existing first-step/cached-step input selection, so the two fields
+  remain present with past_key_values as well as on the first generation step.
+- UniNaVIDMetaForCausalLM.prepare_inputs_labels_for_multimodal:
+  uninavid/model/uninavid_arch.py:383-384.
+  It accepts both optional fields and intentionally does not use them. Its five
+  return values are unchanged.
+
+Interface contract
+- action_history: torch.long, shape [B, T]
+- action_history_mask: torch.bool, shape [B, T]
+- Tests use action_history=[[0,1,2,3]] and action_history_mask=[[True,True,True,True]],
+  both shape [1,4]. No action-ID meaning, embedding, GRU, TST, or NST is introduced.
+
+Test command
+  /home/yons2/miniconda3/envs/navid/bin/python -m unittest discover \
+    -s tests -p 'test_topocorrect_*.py' -v
+
+Environment: Python /home/yons2/miniconda3/envs/navid/bin/python; PyTorch
+2.0.1+cu118; Transformers 4.31.0.
+
+Expected assertions covered by tests/test_topocorrect_action_interface.py
+- forward and multimodal-preparation signatures contain both fields;
+- first generation step retains both non-None fields;
+- cached generation step retains both non-None fields and still reduces input_ids
+  to the final token using the existing behavior;
+- None fields are absent from generation model_inputs, leaving the old key set;
+- action-history supplied versus omitted is a zero-gate multimodal no-op:
+  maximum inputs_embeds absolute error 0.0, sequence length 77 / 77, labels equal,
+  and attention masks equal.
+
+No 7B checkpoint or real vision tower was loaded. Agent, visual caches, history
+merge, Habitat, training, and evaluation were not modified or run.

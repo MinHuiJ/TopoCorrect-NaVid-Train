@@ -381,7 +381,8 @@ class UniNaVIDMetaForCausalLM(ABC):
 
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, attention_mask, past_key_values, labels, images,
-                                             prompts=None, use_topocorrect_tokens=None):
+                                             prompts=None, use_topocorrect_tokens=None,
+                                             action_history=None, action_history_mask=None):
         if 'grid' in self.config.compress_type:
             grid_size = int(self.config.compress_type.split('grid:')[-1])
             if grid_size == 2:

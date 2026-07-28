@@ -1,0 +1,24 @@
+Target tokenizer and model-config validation
+
+Validation source: user-performed inspection of
+/home/yons2/Navid/NaVid-VLN-CE/model_zoo/navid-7b-full-224-video-fps-1-grid-2-r2r-rxr-training-split.
+This implementation phase did not load the checkpoint.
+
+Tokenizer length: 32006
+
+<video_special>    id=32000  encoded=[32000]
+</video_special>   id=32001  encoded=[32001]
+<image_special>    id=32002  encoded=[32002]
+</image_special>   id=32003  encoded=[32003]
+[Navigation]       id=32004  encoded=[32004]
+<image_sep>        id=32005  encoded=[32005]
+
+All six special tokens are confirmed single tokens.
+
+Model configuration:
+model_type=llama
+hidden_size=4096
+vocab_size=32006
+mm_hidden_size=1408
+mm_projector_type=mlp2x_gelu
+mm_vision_tower=./model_zoo/eva_vit_g.pth

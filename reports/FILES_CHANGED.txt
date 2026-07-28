@@ -26,6 +26,15 @@ Source
      special tokens are added, lines 692-699.
    - token_generation, process_tensor, online_process_tensor, feat_cache, and
      long_feat_cache were not changed.
+6. uninavid/model/language_model/llava_llama_vid.py
+   - LlavaLlamaAttForCausalLM.forward accepts action_history and
+     action_history_mask and passes them to multimodal preparation, lines 78-108.
+   - prepare_inputs_for_generation preserves non-None action fields on both the
+     first and cached generation steps, lines 146-172.
+7. uninavid/model/uninavid_arch.py
+   - prepare_inputs_labels_for_multimodal accepts the two optional action fields
+     without using them and retains its original five-value return contract,
+     lines 383-384.
 
 Tests
 6. tests/test_topocorrect_noop.py
@@ -34,9 +43,15 @@ Tests
    - `_Backbone.get_vision_tower()` now returns a non-None `_DummyVisionTower`,
      lines 26-41. The dummy raises AssertionError if called; the harness continues
      to supply synthetic encoded image features through `encode_images`, lines 68-69.
+9. tests/test_topocorrect_action_interface.py
+   - Covers signatures, first/cached generation forwarding, None compatibility,
+     and multimodal zero-gate no-op behavior with action tensors [1,4].
+10. reports/TARGET_TOKENIZER_CONFIG_VALIDATION.txt
+11. reports/ACTION_HISTORY_INTERFACE_RESULTS.txt
 
-No tokenizer vocabulary, sentinel, Agent, generation forwarding, vision cache, or
-history merge logic was modified.
+No tokenizer vocabulary, sentinel, Agent, vision cache, or history merge logic was
+modified. Generation behavior is unchanged except explicit transparent forwarding
+of the two optional action-history fields.
 
 Validation environment: /home/yons2/miniconda3/envs/navid/bin/python;
 PyTorch 2.0.1+cu118; Transformers 4.31.0. No 7B checkpoint, real vision tower,

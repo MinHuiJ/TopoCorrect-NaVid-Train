@@ -8,9 +8,10 @@ Unresolved issues after the zero-gated no-op integration
    /home/yons2/miniconda3/envs/navid/bin/python (PyTorch 2.0.1+cu118 and
    Transformers 4.31.0): 6 tests pass, with no failures, errors, or skips. It does
    not load a real vision tower or a 7B checkpoint.
-3. This change intentionally contains no TST/NST encoder, instruction/action inputs,
-   auxiliary heads, action/Agent changes, generation forwarding changes, or cache
-   changes. delta_topo/delta_nav are fixed zeros.
+3. This change intentionally contains no TST/NST encoder, action embedding, GRU,
+   auxiliary heads, action/Agent changes, or cache changes. The only generation
+   change is transparent action_history/action_history_mask forwarding;
+   delta_topo/delta_nav remain fixed zeros.
 4. Existing history semantics are retained: history contains the current frame at
    low resolution and final_token_length_lst remains only existing metadata. No
    visual cache or merge format was changed; no Habitat, training, or evaluation
